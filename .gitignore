@@ -13,4 +13,9 @@
 /.appanalyzer
 **/oh-package-lock.json5
 *.har
-/.signing/
+# 签名密钥材料不入库（脚本可入库）
+.signing/*.p12
+.signing/*.csr
+.signing/*.cer
+.signing/*.p7b
+.signing/passwords.env
