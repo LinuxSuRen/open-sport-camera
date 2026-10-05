@@ -304,7 +304,7 @@ void OnvifServer::Impl::DiscoveryLoop()
     }
     char xaddrs[160] = {0};
     snprintf(xaddrs, sizeof(xaddrs), "http://%s:%d/onvif/device_service", ip.c_str(), httpPort);
-    char probeMatch[1024] = {0};
+    char probeMatch[4096] = {0};
     snprintf(probeMatch, sizeof(probeMatch),
       "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
       "<s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\" "
