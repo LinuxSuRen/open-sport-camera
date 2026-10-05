@@ -177,6 +177,8 @@ int BurnEngine::Run(const std::string &srcPath, const std::string &dstPath,
             OH_AVFormat_SetIntValue(decFmt, OH_MD_KEY_WIDTH, videoW);
             OH_AVFormat_SetIntValue(decFmt, OH_MD_KEY_HEIGHT, videoH);
             OH_AVFormat_SetIntValue(decFmt, OH_MD_KEY_PIXEL_FORMAT, AV_PIXEL_FORMAT_NV12);
+            // 轮询式 Query 接口要求开启同步模式（API20+）
+            OH_AVFormat_SetIntValue(decFmt, OH_MD_KEY_ENABLE_SYNC_MODE, 1);
             OSC_CHECK(OH_VideoDecoder_Configure(decoder, decFmt));
             OH_AVFormat_Destroy(decFmt);
         }
@@ -192,6 +194,7 @@ int BurnEngine::Run(const std::string &srcPath, const std::string &dstPath,
         {
             OH_AVFormat *encFmt = OH_AVFormat_CreateVideoFormat("video/avc", videoW, videoH);
             OH_AVFormat_SetIntValue(encFmt, OH_MD_KEY_PIXEL_FORMAT, AV_PIXEL_FORMAT_NV12);
+            OH_AVFormat_SetIntValue(encFmt, OH_MD_KEY_ENABLE_SYNC_MODE, 1);
             OH_AVFormat_SetIntValue(encFmt, OH_MD_KEY_BITRATE, 20000000);
             OH_AVFormat_SetIntValue(encFmt, OH_MD_KEY_FRAME_RATE, 30);
             OH_AVFormat_SetIntValue(encFmt, OH_MD_KEY_I_FRAME_INTERVAL, 30);
@@ -225,6 +228,9 @@ int BurnEngine::Run(const std::string &srcPath, const std::string &dstPath,
         bool decEos = false;
         bool encEosNotified = false;
         bool encEosSeen = false;
+        uint64_t decodedFrames = 0;
+        uint64_t encPushed = 0;
+        uint64_t encOutputs = 0;
 
         // ---------- 主循环 ----------
         while (!(demuxEos && decEos && encEosNotified && encEosSeen)) {
@@ -278,6 +284,11 @@ int BurnEngine::Run(const std::string &srcPath, const std::string &dstPath,
                             RgbaToNv12(rgbaFrame.data(), videoW, videoH, nv12Frame.data());
 
                             uint32_t encInIdx = 0;
+                            if (decodedFrames % 60 == 0) {
+                                MEDIA_LOG_INFO("progress: decoded=%{public}llu pushed=%{public}llu out=%{public}llu",
+                                    decodedFrames, encPushed, encOutputs);
+                            }
+                            decodedFrames++;
                             if (OH_VideoEncoder_QueryInputBuffer(encoder, &encInIdx,
                                 POLL_TIMEOUT_US) == AV_ERR_OK) {
                                 OH_AVBuffer *encIn = OH_VideoEncoder_GetInputBuffer(encoder, encInIdx);
@@ -293,6 +304,7 @@ int BurnEngine::Run(const std::string &srcPath, const std::string &dstPath,
                                         inAttr.flags = AVCODEC_BUFFER_FLAGS_NONE;
                                         OH_AVBuffer_SetBufferAttr(encIn, &inAttr);
                                         OH_VideoEncoder_PushInputBuffer(encoder, encInIdx);
+                                        encPushed++;
                                     }
                                 }
                             }
@@ -308,8 +320,21 @@ int BurnEngine::Run(const std::string &srcPath, const std::string &dstPath,
                     }
                 }
                 if (decEos && !encEosNotified) {
-                    OH_VideoEncoder_NotifyEndOfStream(encoder);
+                    uint32_t eosIdx = 0;
+                    if (OH_VideoEncoder_QueryInputBuffer(encoder, &eosIdx,
+                        POLL_TIMEOUT_US) == AV_ERR_OK) {
+                        OH_AVBuffer *eosIn = OH_VideoEncoder_GetInputBuffer(encoder, eosIdx);
+                        if (eosIn != nullptr) {
+                            OH_AVCodecBufferAttr eosAttr = {};
+                            eosAttr.flags = AVCODEC_BUFFER_FLAGS_EOS;
+                            OH_AVBuffer_SetBufferAttr(eosIn, &eosAttr);
+                            OH_VideoEncoder_PushInputBuffer(encoder, eosIdx);
+                            MEDIA_LOG_INFO("encoder EOS pushed (sync mode)");
+                        }
+                    }
                     encEosNotified = true;
+                    MEDIA_LOG_INFO("decoder EOS reached: decoded=%{public}llu pushed=%{public}llu out=%{public}llu",
+                        decodedFrames, encPushed, encOutputs);
                 }
             }
 
@@ -321,6 +346,7 @@ int BurnEngine::Run(const std::string &srcPath, const std::string &dstPath,
                     if (encOut != nullptr) {
                         OH_AVCodecBufferAttr attr = {};
                         OH_AVBuffer_GetBufferAttr(encOut, &attr);
+                        encOutputs++;
                         if ((attr.flags & AVCODEC_BUFFER_FLAGS_EOS) != 0) {
                             encEosSeen = true;
                         } else if (OH_AVBuffer_GetAddr(encOut) != nullptr && attr.size > 0) {

@@ -49,6 +49,9 @@ struct Index {
   @State burnPhase: BurnPhase = 'idle';
   @State burnPct: number = 0;
   @State burnMsg: string = '';
+  @State burnedPath: string = '';
+  @State burnedSrcPath: string = '';
+  @State gallerySaved: boolean = false;
   @State previewWidthVp: number = 360;
   @State previewHeightVp: number = 780;
 
@@ -69,6 +72,23 @@ struct Index {
 
   build() {
     Stack({ alignContent: Alignment.TopStart }) {
+      // 字形农场置于底层：自然布局保证 componentSnapshot 可用，
+      // 烧录期间被全屏遮罩完全遮挡
+      if (this.burnPhase === 'raster') {
+        GlyphFarm({
+          chars: ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ':', '.', ' '],
+          fontPx: this.timerGlyphPx(),
+          color: this.timerItem().textColor,
+          outlineEnabled: this.timerItem().outline,
+          showLapLabel: this.timerItem().showLap,
+          staticItems: this.enabledTextItems(),
+          staticFontPx: this.staticFontPxList(),
+          onReady: (farm: GlyphFarm) => {
+            this.glyphFarm = farm;
+          }
+        })
+      }
+
       Column() {
         // 预览 + 水印叠加层
         Stack() {
@@ -116,22 +136,7 @@ struct Index {
           })
       }
 
-      if (this.burnPhase === 'raster') {
-        GlyphFarm({
-          chars: ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ':', '.', ' '],
-          fontPx: this.timerGlyphPx(),
-          color: this.timerItem().textColor,
-          outlineEnabled: this.timerItem().outline,
-          showLapLabel: this.timerItem().showLap,
-          staticItems: this.enabledTextItems(),
-          staticFontPx: this.staticFontPxList(),
-          onReady: (farm: GlyphFarm) => {
-            this.glyphFarm = farm;
-          }
-        })
-      }
-
-      if (this.burnPhase === 'burning' || this.burnPhase === 'saving') {
+      if (this.burnPhase === 'raster' || this.burnPhase === 'burning' || this.burnPhase === 'saving') {
         this.BurnMask()
       }
 
@@ -309,13 +314,41 @@ struct Index {
         .fontColor('#FFFFFF')
         .textAlign(TextAlign.Center)
         .padding({ left: 32, right: 32 })
-      Button('知道了')
-        .backgroundColor('#FF5E14')
+      if (this.burnPhase === 'done' && !this.gallerySaved && this.burnedPath.length > 0) {
+        SaveButton({ text: SaveDescription.SAVE_TO_GALLERY, icon: SaveIconStyle.FULL_FILLED,
+          buttonType: ButtonType.Capsule })
+          .onClick(async () => {
+            try {
+              this.burnPhase = 'saving';
+              await GalleryService.saveVideo(this.context, this.burnedPath);
+              this.cleanupFile(this.burnedSrcPath);
+              this.cleanupFile(this.burnedPath);
+              this.gallerySaved = true;
+              this.burnMsg = '视频已保存到相册（含水印）';
+              this.burnPhase = 'done';
+            } catch (e) {
+              hilog.error(DOMAIN, TAG, 'save to gallery failed: %{public}s', JSON.stringify(e));
+              this.burnMsg = '保存失败，可重试或检查存储权限';
+              this.burnPhase = 'done';
+            }
+          })
+      }
+      Button(this.gallerySaved ? '知道了' : '暂不保存')
+        .backgroundColor('#333333')
         .fontColor('#FFFFFF')
+        .margin({ top: 12 })
         .onClick(() => {
+          if (!this.gallerySaved && this.burnedPath.length > 0) {
+            // 暂不保存：清理临时文件
+            this.cleanupFile(this.burnedSrcPath);
+            this.cleanupFile(this.burnedPath);
+          }
           this.burnPhase = 'idle';
           this.burnMsg = '';
           this.burnPct = 0;
+          this.burnedPath = '';
+          this.burnedSrcPath = '';
+          this.gallerySaved = false;
         })
     }
     .width('100%')
@@ -393,6 +426,7 @@ struct Index {
       this.recording = true;
       this.startRecDurationTick();
     } catch (e) {
+      hilog.error(DOMAIN, TAG, 'startRecording failed: %{public}s', JSON.stringify(e));
       this.showBanner('开始录制失败');
       await this.cleanupRecording();
     }
@@ -576,12 +610,12 @@ struct Index {
         });
       }
 
-      this.burnPhase = 'saving';
-      await GalleryService.saveVideo(this.context, dstPath);
-      this.cleanupFile(srcPath);
-      this.cleanupFile(dstPath);
+      // 媒体库写入必须由用户手势触发：交给结果面板的 SaveButton
+      this.burnedSrcPath = srcPath;
+      this.burnedPath = dstPath;
+      this.gallerySaved = false;
       this.burnPhase = 'done';
-      this.burnMsg = '视频已保存到相册（含水印）';
+      this.burnMsg = '水印已写入视频，点击下方按钮保存到相册';
     } catch (e) {
       hilog.error(DOMAIN, TAG, 'burn pipeline error: %{public}s', JSON.stringify(e));
       this.burnPhase = 'error';

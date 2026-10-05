@@ -69,10 +69,6 @@ export struct GlyphFarm {
         }, (item: WatermarkItem, i: number) => this.prefix + '_s' + i + '_' + item.text)
       }
     }
-    .width(1)
-    .height(1)
-    .clip(true)
-    .position({ x: 0, y: 0 })
     .hitTestBehavior(HitTestMode.None)
   }
 

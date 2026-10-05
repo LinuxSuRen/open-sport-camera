@@ -62,21 +62,15 @@ export class CameraService {
     // begin/commit 事务内调用；提交后另开事务设置会抛 7400103；
     // isVideoStabilizationModeSupported 必须在事务外（已提交态）调用。
     this.session = this.manager.createSession<camera.VideoSession>(camera.SceneMode.NORMAL_VIDEO);
+    // 首个事务保持绝对干净：仅输入+预览输出。
+    // 任何失败调用（如 EIS 设置）都可能给流配置留下半损坏状态，导致预览冻结。
     this.session.beginConfig();
     this.session.addInput(this.input);
     this.session.addOutput(this.previewOutput);
-    let stabApplied = false;
-    try {
-      this.session.setVideoStabilizationMode(camera.VideoStabilizationMode.AUTO);
-      stabApplied = true;
-    } catch (e) {
-      const err = e as BusinessError;
-      hilog.warn(DOMAIN, TAG, 'set stab AUTO in first config failed: %{public}d', err.code);
-    }
     await this.session.commitConfig();
     await this.session.start();
-    // 启动后确认防抖支持度（UI 徽标与录制事务沿用 AUTO）
-    this.chosenStabMode = stabApplied ? camera.VideoStabilizationMode.AUTO as number : 0;
+    // EIS 延后到录制挂流事务（见 attachVideoSurface）
+    this.chosenStabMode = 0;
     hilog.info(DOMAIN, TAG,
       'camera session started, preview=%{public}dx%{public}d stab=%{public}d',
       this.chosenPreviewProfile.size.width, this.chosenPreviewProfile.size.height, this.chosenStabMode);
@@ -129,13 +123,25 @@ export class CameraService {
     const videoOutput = this.manager.createVideoOutput(this.chosenVideoProfile, recorderSurfaceId);
     this.session.beginConfig();
     this.session.addOutput(videoOutput);
-    // EIS 属于视频流能力：挂载 VideoOutput 的事务内设置（预览-only 会话下设置会被拒绝）
-    try {
-      this.session.setVideoStabilizationMode(camera.VideoStabilizationMode.AUTO);
-      this.chosenStabMode = camera.VideoStabilizationMode.AUTO as number;
-    } catch (e) {
-      const err = e as BusinessError;
-      hilog.warn(DOMAIN, TAG, 'set stab with video stream failed: %{public}d', err.code);
+    // EIS 属于视频流能力：挂载 VideoOutput 的事务内设置（预览-only 会话下设置会被拒绝）。
+    // AUTO→HIGH→MIDDLE 逐级降级；部分机型固件缺 EIS 标定（如 SGT-AL50）会全部失败，
+    // 此时录制正常但不启用防抖。
+    const stabTryList: camera.VideoStabilizationMode[] = [
+      camera.VideoStabilizationMode.AUTO,
+      camera.VideoStabilizationMode.HIGH,
+      camera.VideoStabilizationMode.MIDDLE,
+    ];
+    this.chosenStabMode = 0;
+    for (const mode of stabTryList) {
+      try {
+        this.session.setVideoStabilizationMode(mode);
+        this.chosenStabMode = mode as number;
+        break;
+      } catch (e) {
+        const err = e as BusinessError;
+        hilog.warn(DOMAIN, TAG, 'set stab %{public}d with video stream failed: %{public}s',
+          mode as number, JSON.stringify(err));
+      }
     }
     await this.session.commitConfig();
     await videoOutput.start();
