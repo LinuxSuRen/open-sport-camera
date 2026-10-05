@@ -8,7 +8,8 @@ on:
   workflow_dispatch:
 
 env:
-  # HarmonyOS Command Line Tools 6.1.1.268（华为官方 CDN，长期有效签名链接）
+  # HarmonyOS Command Line Tools 6.1.1.268 兜底直链（华为官方 CDN，长期有效签名）
+  # 下载步骤优先从 GitHub 镜像解析最新链接（该镜像仓库默认分支为 master），失败时回退到这里
   CDT_URL: https://contentcenter-vali-drcn.dbankcdn.cn/pvt_2/DeveloperAlliance_package_901_9/bb/v3/2kEEcCD9Ts2UwlVvAYKfNQ/commandline-tools-linux-x64-6.1.1.268.zip?HW-CC-KV=V1&HW-CC-Date=20260518T055136Z&HW-CC-Expire=315360000&HW-CC-Sign=E81EFE847B3869574A569EC11FD6E665435892764C866BD083E935748DC07EF
 
 jobs:
@@ -27,7 +28,24 @@ jobs:
       - name: 下载 Command Line Tools
         if: steps.cdt-cache.outputs.cache-hit != 'true'
         run: |
-          curl -L --retry 3 -o /tmp/cdt.zip "$CDT_URL"
+          set -e
+          # 优先从镜像解析（CDN 签名可能轮换，镜像会同步更新；注意默认分支是 master）
+          RESOLVED=$(curl -sL --retry 2 "https://raw.githubusercontent.com/hhtczengjing/ohos_command_line_tools/master/versions/6.1.1.268.json" | python3 -c "
+          import json,sys
+          try:
+            d = json.load(sys.stdin)
+            print(d['platforms']['linux-x64']['downloadUrl'])
+          except Exception:
+            pass
+          ") || true
+          if [ -n "$RESOLVED" ]; then
+            URL="$RESOLVED"
+          else
+            echo "镜像解析失败，回退到 env.CDT_URL 兜底直链"
+            URL="$CDT_URL"
+          fi
+          echo "下载 CDT: $URL"
+          curl -L --retry 3 -o /tmp/cdt.zip "$URL"
           unzip -q /tmp/cdt.zip -d /tmp/cdt-out
           mv /tmp/cdt-out/command-line-tools ~/command-line-tools
 
