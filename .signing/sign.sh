@@ -11,6 +11,15 @@ P7B="$DIR/osc_debug_profile.p7b"
 P12="$DIR/osc_debug.p12"
 OUT="${HAP%.hap}-signed.hap"
 
+# Profile 文件名宽容处理：未按约定命名时取目录里任意 .p7b
+if [ ! -f "$P7B" ]; then
+  FOUND_P7B="$(ls "$DIR"/*.p7b 2>/dev/null | head -1 || true)"
+  if [ -n "$FOUND_P7B" ]; then
+    P7B="$FOUND_P7B"
+    echo "使用 Profile: $P7B"
+  fi
+fi
+
 for f in "$CER" "$P7B" "$P12"; do
   if [ ! -f "$f" ]; then
     echo "缺少签名材料: $f（参见 CONTRIBUTING.md 真机调试签名一节）" >&2
