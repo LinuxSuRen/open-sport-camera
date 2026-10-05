@@ -1,0 +1,20 @@
+{
+  "modelVersion": "5.0.0",
+  "dependencies": {},
+  "execution": {
+    // "analyze": "normal",              /* 定义Defect当前执行模式：default|normal|strict */
+    // "dryRun": false,                  /* 分析当前工程，若为true，只执行分析阶段，不执行真实编译 */
+    // "incremental": true,              /* 是否增量编译 */
+    // "parallel": true,                 /* 是否并行编译 */
+    // "typeCheck": false,               /* 是否执行类型检查 */
+  },
+  "logging": {
+    // "level": "info"                   /* 定义日志等级：debug|info|warn|error */
+  },
+  "debugging": {
+    // "stacktrace": false               /* 定义在进行断点调试时，是否进行堆栈优化 */
+  },
+  "nodeOptions": {
+    // "maxOldSpaceSize": 8192           /* 用于定义执行过程中node内存占用的最大值 */
+  }
+}

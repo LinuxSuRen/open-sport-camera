@@ -1,0 +1,56 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "运动相机主模块"
+    },
+    {
+      "name": "app_name",
+      "value": "运动相机"
+    },
+    {
+      "name": "ability_desc",
+      "value": "相机拍摄"
+    },
+    {
+      "name": "camera_perm_reason",
+      "value": "用于拍摄运动视频"
+    },
+    {
+      "name": "mic_perm_reason",
+      "value": "用于录制视频声音"
+    },
+    {
+      "name": "timer_total",
+      "value": "总时长"
+    },
+    {
+      "name": "lap",
+      "value": "计圈"
+    },
+    {
+      "name": "start_record",
+      "value": "开始录制"
+    },
+    {
+      "name": "stop_record",
+      "value": "停止录制"
+    },
+    {
+      "name": "burning",
+      "value": "正在写入水印"
+    },
+    {
+      "name": "saved_to_gallery",
+      "value": "已保存到相册"
+    },
+    {
+      "name": "watermark_settings",
+      "value": "水印设置"
+    },
+    {
+      "name": "stabilization",
+      "value": "防抖"
+    }
+  ]
+}

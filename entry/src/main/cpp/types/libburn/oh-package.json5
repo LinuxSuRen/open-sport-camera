@@ -1,0 +1,6 @@
+{
+  "name": "libburn.so",
+  "types": "./index.d.ts",
+  "version": "1.0.0",
+  "description": "Open Sport Camera burn engine native interface"
+}

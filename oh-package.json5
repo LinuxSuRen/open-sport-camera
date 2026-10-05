@@ -1,0 +1,10 @@
+{
+  "modelVersion": "5.0.0",
+  "name": "open-sport-camera",
+  "version": "0.1.0",
+  "description": "Open Sport Camera - 运动视频拍摄（游泳优先）",
+  "dependencies": {},
+  "devDependencies": {
+    "@ohos/hypium": "1.0.21"
+  }
+}
