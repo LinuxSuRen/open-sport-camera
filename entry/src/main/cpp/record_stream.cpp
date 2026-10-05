@@ -25,6 +25,7 @@
 #include "native_image/native_image.h"
 #include "native_window/external_window.h"
 
+#include "blitter.h"
 #include "codec_common.h"
 
 namespace osc {
@@ -94,11 +95,14 @@ struct RecordStream::Impl {
 
   // 渲染线程（常驻：Prepare 起，空闲排水保持流不塞；录制时绘制到编码面）
   std::atomic<bool> loopRunning{false};
+  std::atomic<bool> drainRunning{false};
+  std::thread drainThread;
   std::mutex frameMtx;
   std::condition_variable frameCv;
   bool framePending = false;
   std::thread renderThread;
   std::atomic<uint64_t> frameCount{0};
+  uint64_t idleCount = 0;
   int64_t firstTs = -1;
   int64_t lastTs = -1;
 
@@ -109,6 +113,7 @@ struct RecordStream::Impl {
   int rotation = 0;
 
   void RenderLoop();
+  void DrainLoop();
   bool SetupGraphics();
   bool InitGL(uint64_t &surfaceIdOut);
   bool InitEncoder(int bitrate);
@@ -116,6 +121,8 @@ struct RecordStream::Impl {
 };
 
 // ---------------- 编码器回调（surface 模式） ----------------
+static void OnEncodedOutput(RecordStream::Impl *impl, OH_AVCodec *codec, uint32_t index,
+    OH_AVBuffer *buffer);
 static void OnEncoderError(OH_AVCodec *codec, int32_t errorCode, void *userData)
 {
   (void)codec;
@@ -140,17 +147,16 @@ static void OnNeedInputParameter(OH_AVCodec *codec, uint32_t index, OH_AVFormat 
   OH_VideoEncoder_PushInputParameter(codec, index);
 }
 
-static void OnNewOutputBuffer(OH_AVCodec *codec, uint32_t index, OH_AVBuffer *buffer,
-    void *userData)
+static void OnEncodedOutput(RecordStream::Impl *impl, OH_AVCodec *codec, uint32_t index,
+    OH_AVBuffer *buffer)
 {
-  auto *impl = static_cast<RecordStream::Impl *>(userData);
   OH_AVCodecBufferAttr attr = {};
   OH_AVBuffer_GetBufferAttr(buffer, &attr);
   const uint8_t *data = OH_AVBuffer_GetAddr(buffer);
 
   std::lock_guard<std::mutex> lock(impl->encOutMtx);
   if ((attr.flags & AVCODEC_BUFFER_FLAGS_EOS) != 0) {
-    // EOS：由 Stop 流程收尾
+    // EOS：Stop 流程收尾
   } else if (data != nullptr && attr.size > 0) {
     if (impl->spsNal.empty() || impl->ppsNal.empty()) {
       CollectAvcCsd(data, attr.size, impl->spsNal, impl->ppsNal);
@@ -177,6 +183,13 @@ static void OnNewOutputBuffer(OH_AVCodec *codec, uint32_t index, OH_AVBuffer *bu
     }
   }
   OH_VideoEncoder_FreeOutputBuffer(codec, index);
+}
+
+static void OnNewOutputBuffer(OH_AVCodec *codec, uint32_t index, OH_AVBuffer *buffer,
+    void *userData)
+{
+  auto *impl = static_cast<RecordStream::Impl *>(userData);
+  OnEncodedOutput(impl, codec, index, buffer);
 }
 
 // ---------------- 帧可用回调（相机驱动节奏） ----------------
@@ -221,8 +234,8 @@ bool RecordStream::Impl::InitGL(uint64_t &surfaceIdOut)
     RS_ERR("eglCreateContext failed");
     return false;
   }
-  // 1x1 pbuffer：Prepare 阶段的资源创建上下文（GL 对象与上下文绑定生命周期）
-  const EGLint pbufAttribs[] = {EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE};
+  // pbuffer：资源创建 + 后续 readback 渲染目标（视频分辨率）
+  const EGLint pbufAttribs[] = {EGL_WIDTH, width, EGL_HEIGHT, height, EGL_NONE};
   pbuffer = eglCreatePbufferSurface(display, config, pbufAttribs);
   if (pbuffer == EGL_NO_SURFACE || !eglMakeCurrent(display, pbuffer, pbuffer, context)) {
     RS_ERR("pbuffer setup failed");
@@ -271,38 +284,20 @@ bool RecordStream::Impl::InitEncoder(int bitrate)
     RS_ERR("create encoder failed");
     return false;
   }
-  // 顺序（surface 模式）：RegisterCallback → Configure → RegisterParameterCallback
-  OH_AVCodecCallback cb;
-  cb.onError = OnEncoderError;
-  cb.onStreamChanged = OnEncoderStreamChanged;
-  cb.onNeedInputBuffer = nullptr;
-  cb.onNewOutputBuffer = OnNewOutputBuffer;
-  if (OH_VideoEncoder_RegisterCallback(encoder, cb, this) != AV_ERR_OK) {
-    RS_ERR("register callback failed");
-    return false;
-  }
-  // surface 模式输入参数回调：INITIALIZED 状态注册（真机实测 Configure 后注册报 INVALID_STATE=8）
-  {
-    OH_AVErrCode rc = OH_VideoEncoder_RegisterParameterCallback(encoder, OnNeedInputParameter, this);
-    if (rc != AV_ERR_OK) {
-      RS_ERR("register parameter callback failed, code=%{public}d", rc);
-      return false;
-    }
-  }
   OH_AVFormat *fmt = OH_AVFormat_CreateVideoFormat("video/avc", width, height);
   OH_AVFormat_SetIntValue(fmt, OH_MD_KEY_BITRATE, bitrate);
   OH_AVFormat_SetIntValue(fmt, OH_MD_KEY_FRAME_RATE, fps);
   OH_AVFormat_SetIntValue(fmt, OH_MD_KEY_I_FRAME_INTERVAL, fps); // 1s GOP
+  OH_AVFormat_SetIntValue(fmt, OH_MD_KEY_PIXEL_FORMAT, AV_PIXEL_FORMAT_NV12);
+  // 缓冲模式 + 同步模式：轮询收发（烧录引擎同款，真机已验证；
+  // 本机 surface 模式 EGL 窗口缓冲分配 0x0 失败，弃用）
+  OH_AVFormat_SetIntValue(fmt, OH_MD_KEY_ENABLE_SYNC_MODE, 1);
   if (OH_VideoEncoder_Configure(encoder, fmt) != AV_ERR_OK) {
     OH_AVFormat_Destroy(fmt);
     RS_ERR("encoder configure failed");
     return false;
   }
   OH_AVFormat_Destroy(fmt);
-  if (OH_VideoEncoder_GetSurface(encoder, &encWindow) != AV_ERR_OK || encWindow == nullptr) {
-    RS_ERR("get encoder surface failed");
-    return false;
-  }
   return true;
 }
 
@@ -356,19 +351,49 @@ bool RecordStream::Impl::SetupGraphics()
   return true;
 }
 
+
+// 编码输出轮询收取（同步模式）
+void RecordStream::Impl::DrainLoop()
+{
+  RS_LOG("drain loop start");
+  while (drainRunning.load()) {
+    uint32_t idx = 0;
+    if (OH_VideoEncoder_QueryOutputBuffer(encoder, &idx, 500000) != AV_ERR_OK) {
+      continue;
+    }
+    OH_AVBuffer *buf = OH_VideoEncoder_GetOutputBuffer(encoder, idx);
+    if (buf == nullptr) {
+      continue;
+    }
+    OnEncodedOutput(this, encoder, idx, buf);
+  }
+  RS_LOG("drain loop exit");
+}
+
 void RecordStream::Impl::RenderLoop()
 {
-  // 常驻循环：空闲态绑 pbuffer（仅排水，防生产端堵流），录制态切编码面绘制
+  // 缓冲模式管线：相机帧 → GL 合成（阶段2加水印）→ readback → NV12 → 编码
   if (!eglMakeCurrent(display, pbuffer, pbuffer, context)) {
     RS_ERR("makeCurrent pbuffer failed");
     return;
   }
-  bool onEnc = false;
+  // pbuffer 尺寸 = 视频尺寸（Configure 前 pbuffer 是 1x1；这里重建）
+  // 注：pbuffer 表面尺寸固定，此处直接按 width/height 创建的 pbuffer 已在 Prepare 重建
+  std::vector<uint8_t> rgba(static_cast<size_t>(width) * height * 4);
+  std::vector<uint8_t> nv12;
+  int32_t encStride = width;
+  int32_t encUvOffset = width * height;
+  bool encLayoutResolved = false;
+  uint64_t pushed = 0;
+  uint64_t outputs = 0;
+
   while (loopRunning.load()) {
     std::unique_lock<std::mutex> lock(frameMtx);
     frameCv.wait_for(lock, std::chrono::milliseconds(200),
         [this] { return framePending || !loopRunning.load(); });
     if (!framePending) {
+      // 空闲：仍轮询编码输出（录制停止瞬间可能有残留）
+      lock.unlock();
       continue;
     }
     framePending = false;
@@ -377,27 +402,16 @@ void RecordStream::Impl::RenderLoop()
     if (OH_NativeImage_UpdateSurfaceImage(nativeImage) != 0) {
       continue;
     }
+    int64_t ts = OH_NativeImage_GetTimestamp(nativeImage);
+    idleCount++;
+    if (idleCount % 150 == 0) {
+      RS_LOG("drained %{public}llu", static_cast<unsigned long long>(idleCount));
+    }
     if (!running.load()) {
       continue; // 空闲排水：仅消费，保持队列流转
     }
-    int64_t ts = OH_NativeImage_GetTimestamp(nativeImage);
 
-    if (!onEnc) {
-      if (encSurface == EGL_NO_SURFACE) {
-        encSurface = eglCreateWindowSurface(display, config,
-          reinterpret_cast<EGLNativeWindowType>(encWindow), nullptr);
-        if (encSurface == EGL_NO_SURFACE) {
-          RS_ERR("eglCreateWindowSurface failed code=%{public}x", eglGetError());
-          continue;
-        }
-      }
-      if (!eglMakeCurrent(display, encSurface, encSurface, context)) {
-        RS_ERR("makeCurrent enc failed code=%{public}x", eglGetError());
-        continue;
-      }
-      onEnc = true;
-    }
-
+    // GL 合成到 pbuffer
     glViewport(0, 0, width, height);
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -407,21 +421,72 @@ void RecordStream::Impl::RenderLoop()
     glUniform1i(uTexLoc, 0);
     glBindVertexArray(vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glFinish();
+    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
 
-    eglPresentationTimeANDROID(display, encSurface, ts);
-    eglSwapBuffers(display, encSurface);
-    frameCount.fetch_add(1);
     if (firstTs < 0) {
       firstTs = ts;
+      RS_LOG("first frame ts=%{public}lld", static_cast<long long>(ts));
     }
     lastTs = ts;
+
+    // 推编码器（缓冲+同步）
+    uint32_t inIdx = 0;
+    if (OH_VideoEncoder_QueryInputBuffer(encoder, &inIdx, 3000000) != AV_ERR_OK) {
+      RS_ERR("query input buffer timeout");
+      continue;
+    }
+    OH_AVBuffer *inBuf = OH_VideoEncoder_GetInputBuffer(encoder, inIdx);
+    if (inBuf == nullptr) {
+      continue;
+    }
+    uint8_t *dst = OH_AVBuffer_GetAddr(inBuf);
+    int32_t cap = OH_AVBuffer_GetCapacity(inBuf);
+    if (!encLayoutResolved) {
+      int32_t st = 0;
+      OH_AVFormat *desc = OH_VideoEncoder_GetInputDescription(encoder);
+      if (desc != nullptr) {
+        if (OH_AVFormat_GetIntValue(desc, OH_MD_KEY_VIDEO_STRIDE, &st) && st > 0) {
+          encStride = st;
+        }
+        OH_AVFormat_Destroy(desc);
+      }
+      int32_t tight = encStride * height + encStride * height / 2;
+      if (cap >= tight) {
+        encUvOffset = cap - encStride * height / 2;
+      }
+      nv12.resize(static_cast<size_t>(encUvOffset) + static_cast<size_t>(encStride) * height / 2);
+      encLayoutResolved = true;
+      RS_LOG("enc layout: cap=%{public}d stride=%{public}d uvOff=%{public}d", cap, encStride,
+        encUvOffset);
+    }
+    RgbaToNv12Stride(rgba.data(), width, height, nv12.data(), encStride, encUvOffset);
+    size_t need = static_cast<size_t>(encUvOffset) + static_cast<size_t>(encStride) * height / 2;
+    if (dst != nullptr && cap >= static_cast<int32_t>(need)) {
+      memcpy(dst, nv12.data(), need);
+      OH_AVCodecBufferAttr attr = {};
+      attr.pts = ts / 1000; // 编码器 PTS 单位 us，相机时间戳 ns
+      attr.size = static_cast<int32_t>(need);
+      OH_AVBuffer_SetBufferAttr(inBuf, &attr);
+      OH_VideoEncoder_PushInputBuffer(encoder, inIdx);
+      pushed++;
+      if (frameCount.fetch_add(1) == 0) {
+        RS_LOG("first frame pushed to encoder");
+      }
+    }
+
+    // 收编码输出 → muxer
+    uint32_t outIdx = 0;
+    while (OH_VideoEncoder_QueryOutputBuffer(encoder, &outIdx, 0) == AV_ERR_OK) {
+      OH_AVBuffer *outBuf = OH_VideoEncoder_GetOutputBuffer(encoder, outIdx);
+      if (outBuf != nullptr) {
+        OnEncodedOutput(this, encoder, outIdx, outBuf);
+        outputs++;
+      }
+    }
   }
-  // 回到 pbuffer，便于下次录制接管
-  if (onEnc) {
-    eglMakeCurrent(display, pbuffer, pbuffer, context);
-  }
-  RS_LOG("render loop exit, frames=%{public}llu",
-    static_cast<unsigned long long>(frameCount.load()));
+  RS_LOG("loop exit: pushed=%{public}llu outputs=%{public}llu",
+    static_cast<unsigned long long>(pushed), static_cast<unsigned long long>(outputs));
 }
 
 int RecordStream::Prepare(int width, int height, int fps, int bitrate, int rotation,
@@ -503,9 +568,35 @@ RecordStats RecordStream::Stop()
   }
   impl_->running.store(false);
   impl_->frameCv.notify_all();
-  OH_VideoEncoder_NotifyEndOfStream(impl_->encoder);
+  // 缓冲+同步模式 EOS：空缓冲+标记推送
+  {
+    uint32_t eosIdx = 0;
+    if (OH_VideoEncoder_QueryInputBuffer(impl_->encoder, &eosIdx, 3000000) == AV_ERR_OK) {
+      OH_AVBuffer *eosIn = OH_VideoEncoder_GetInputBuffer(impl_->encoder, eosIdx);
+      if (eosIn != nullptr) {
+        OH_AVCodecBufferAttr eosAttr = {};
+        eosAttr.flags = AVCODEC_BUFFER_FLAGS_EOS;
+        OH_AVBuffer_SetBufferAttr(eosIn, &eosAttr);
+        OH_VideoEncoder_PushInputBuffer(impl_->encoder, eosIdx);
+      }
+    }
+  }
+  // 排空剩余输出（EOS 后编码器会吐出缓冲内全部帧）
+  for (int i = 0; i < 300; i++) {
+    uint32_t outIdx = 0;
+    bool any = false;
+    while (OH_VideoEncoder_QueryOutputBuffer(impl_->encoder, &outIdx, 200000) == AV_ERR_OK) {
+      OH_AVBuffer *outBuf = OH_VideoEncoder_GetOutputBuffer(impl_->encoder, outIdx);
+      if (outBuf != nullptr) {
+        OnEncodedOutput(impl_, impl_->encoder, outIdx, outBuf);
+        any = true;
+      }
+    }
+    if (!any) {
+      break;
+    }
+  }
   OH_VideoEncoder_Stop(impl_->encoder);
-  std::this_thread::sleep_for(std::chrono::milliseconds(200)); // 输出回调排空
   {
     std::lock_guard<std::mutex> lock(impl_->encOutMtx);
     if (impl_->muxerStarted) {

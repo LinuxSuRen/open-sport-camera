@@ -412,7 +412,11 @@ struct Index {
     }
   }
 
+  private openCameraCount: number = 0;
+
   private async openCamera(surfaceId: string): Promise<void> {
+    this.openCameraCount++;
+    hilog.info(DOMAIN, TAG, 'openCamera call #%{public}d', this.openCameraCount);
     try {
       await this.permsReady;
       let videoSurfaceId: string | undefined = undefined;
