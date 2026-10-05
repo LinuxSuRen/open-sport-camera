@@ -271,7 +271,14 @@ void RtspServer::Impl::SendRtpNal(const uint8_t *nal, size_t size, int64_t ptsUs
     return;
   }
   const size_t kMaxPacket = 1400; // MTU 安全值
-  uint32_t ts = static_cast<uint32_t>((ptsUs * videoClockRate / 1000000) & 0xFFFFFFFF);
+  // 用系统单调时钟保持 RTP 时间戳连续稳定（ptsUs 在录制重启时会重置）
+  static int64_t baseNs = -1;
+  int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+  if (baseNs < 0) {
+    baseNs = nowNs;
+  }
+  uint32_t ts = static_cast<uint32_t>(((nowNs - baseNs) / 1000) * videoClockRate / 1000000);
 
   auto sendPacket = [&](const uint8_t *payload, size_t len, uint8_t nriType, bool last) {
     uint8_t header[12] = {0};
@@ -299,8 +306,10 @@ void RtspServer::Impl::SendRtpNal(const uint8_t *nal, size_t size, int64_t ptsUs
         !WriteAll(clientFd, payload, len)) {
       playing = false;
       needKey = true;
-      RT_LOG("client write failed, detach (sent %{public}llu pkts)",
-        static_cast<unsigned long long>(sentPackets));
+      RT_LOG("client write timeout, disconnect (sent %{public}llu pkts %{public}llu bytes)",
+        static_cast<unsigned long long>(sentPackets),
+        static_cast<unsigned long long>(sentBytes));
+      return; // 直接返回，由 AcceptLoop 关闭
     }
   };
 
