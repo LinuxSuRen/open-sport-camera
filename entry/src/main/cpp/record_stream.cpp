@@ -73,10 +73,13 @@ void main() {
 static const char *VERT_SRC = R"(#version 300 es
 layout(location=0) in vec2 aPos;
 out vec2 vTex;
-uniform mat3 uTransform; // OH_NativeImage 变换矩阵（处理传感器旋转/镜像）
+uniform float uFlipX; // 前置摄像头水平镜像修正（1.0=翻转 0.0=不翻转）
 void main() {
     vec2 uv = vec2(aPos.x * 0.5 + 0.5, 0.5 - aPos.y * 0.5);
-    vTex = (uTransform * vec3(uv, 1.0)).xy;
+    if (uFlipX > 0.5) {
+        uv.x = 1.0 - uv.x;
+    }
+    vTex = uv;
     gl_Position = vec4(aPos, 0.0, 1.0);
 })";
 
@@ -105,8 +108,8 @@ struct RecordStream::Impl {
   GLuint vbo = 0;
   GLuint oesTex = 0;
   GLint uTexLoc = -1;
-  GLint uTransformLoc = -1;
-  float camTransform[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+  GLint uFlipXLoc = -1;
+  float camFlipX = 0.0f; // 前置摄像头=1.0 后置=0.0
   // 水印（阶段2）
   GLuint wmProgram = 0;
   GLint wmRectLoc = -1;
@@ -406,7 +409,7 @@ bool RecordStream::Impl::SetupGraphics()
     return false;
   }
   uTexLoc = glGetUniformLocation(program, "uTex");
-  uTransformLoc = glGetUniformLocation(program, "uTransform");
+  uFlipXLoc = glGetUniformLocation(program, "uFlipX");
 
   // 水印程序
   GLuint wvs = compile(GL_VERTEX_SHADER, WM_VERT_SRC);
@@ -605,16 +608,8 @@ void RecordStream::Impl::RenderLoop()
     if (OH_NativeImage_UpdateSurfaceImage(nativeImage) != 0) {
       continue;
     }
-    // 获取相机传感器变换矩阵（处理旋转/镜像）
-    {
-      float matrix[16] = {0};
-      if (OH_NativeImage_GetTransformMatrix(nativeImage, matrix) == 0) {
-        // 4x4 → 3x3（取 UV 相关部分）
-        camTransform[0] = matrix[0]; camTransform[1] = matrix[4]; camTransform[2] = matrix[12];
-        camTransform[3] = matrix[1]; camTransform[4] = matrix[5]; camTransform[5] = matrix[13];
-        camTransform[6] = matrix[3]; camTransform[7] = matrix[7]; camTransform[8] = matrix[15];
-      }
-    }
+    // 方向策略：muxer rotation=90 处理竖屏，GL 只做前置镜像修正
+    // （变换矩阵会叠加导致双重旋转）
     int64_t ts = OH_NativeImage_GetTimestamp(nativeImage);
     idleCount++;
     if (idleCount % 150 == 0) {
@@ -632,8 +627,8 @@ void RecordStream::Impl::RenderLoop()
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_EXTERNAL_OES, oesTex);
     glUniform1i(uTexLoc, 0);
-    if (uTransformLoc >= 0) {
-      glUniformMatrix3fv(uTransformLoc, 1, GL_FALSE, camTransform);
+    if (uFlipXLoc >= 0) {
+      glUniform1f(uFlipXLoc, camFlipX);
     }
     glBindVertexArray(vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
@@ -734,10 +729,11 @@ int RecordStream::Prepare(int width, int height, int fps, int bitrate, int rotat
     impl_ = nullptr;
     return -104;
   }
+  impl_->camFlipX = (rotation >= 270) ? 1.0f : 0.0f; // 前置=270 翻转
   impl_->loopRunning.store(true);
   impl_->renderThread = std::thread(&Impl::RenderLoop, impl_);
-  RS_LOG("prepared %{public}dx%{public}d@%{public}d rotation=%{public}d", width, height, fps,
-    rotation);
+  RS_LOG("prepared %{public}dx%{public}d@%{public}d rotation=%{public}d flip=%{public}.0f",
+    width, height, fps, rotation, impl_->camFlipX);
   return 0;
 }
 
