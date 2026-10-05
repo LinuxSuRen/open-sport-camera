@@ -553,6 +553,7 @@ struct Index {
       this.frontCamera = !this.frontCamera;
       this.lensList = this.cameraService.getLensList();
       this.currentLensId = this.cameraService.getCurrentCameraId();
+      StreamRecorderService.setCameraFlip(this.frontCamera);
       this.showBanner('已切换到' + (this.frontCamera ? '前置' : '后置') + '摄像头');
     } catch (e) {
       hilog.error(DOMAIN, TAG, 'switchCamera failed: %{public}s', JSON.stringify(e));
@@ -632,7 +633,8 @@ struct Index {
         glyphs: glyphMeta,
         statics: staticsMeta,
       };
-      StreamRecorderService.setWatermark(JSON.stringify(cfg), buffers);
+      hilog.info(DOMAIN, TAG, 'wm cfg: anchor=%{public}d mx=%{public}d my=%{public}d',
+        timerCfg.anchor, this.marginXPx(timerCfg.margin), this.marginYPx(timerCfg.margin));
       hilog.info(DOMAIN, TAG, 'watermark assets ready: %{public}d glyphs', glyphs.length);
       return true;
     } catch (e) {

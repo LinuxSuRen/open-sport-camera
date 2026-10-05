@@ -426,6 +426,22 @@ static napi_value NapiRtspStatus(napi_env env, napi_callback_info info)
     return result;
 }
 
+
+static napi_value NapiSetCameraFlip(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc < 1) {
+        napi_throw_error(env, nullptr, "setCameraFlip 需要 1 个参数");
+        return nullptr;
+    }
+    bool flip = false;
+    napi_get_value_bool(env, args[0], &flip);
+    g_recordStream.SetFlipX(flip);
+    return nullptr;
+}
+
 } // namespace} // namespace
 
 EXTERN_C_START
@@ -439,6 +455,7 @@ static napi_value Init(napi_env env, napi_value exports)
         {"releaseRecord", nullptr, NapiReleaseRecord, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setWatermarkAssets", nullptr, NapiSetWatermarkAssets, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"updateWatermarkLaps", nullptr, NapiUpdateWatermarkLaps, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setCameraFlip", nullptr, NapiSetCameraFlip, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"startRtsp", nullptr, NapiStartRtsp, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"stopRtsp", nullptr, NapiStopRtsp, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"rtspStatus", nullptr, NapiRtspStatus, nullptr, nullptr, nullptr, napi_default, nullptr},

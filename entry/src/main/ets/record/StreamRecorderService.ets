@@ -71,6 +71,11 @@ export class StreamRecorderService {
     burn.setWatermarkAssets(cfgJson, buffers);
   }
 
+  /** 切换摄像头时设置水平镜像 */
+  static setCameraFlip(flip: boolean): void {
+    burn.setCameraFlip(flip);
+  }
+
   /** 录制中更新计圈 */
   static updateLaps(lapsJson: string): void {
     burn.updateWatermarkLaps(lapsJson);

@@ -52,3 +52,6 @@ export interface RtspStatus {
 
 /** RTSP 服务器状态 */
 export const rtspStatus: () => RtspStatus;
+
+/** 切换前后摄像头时设置水平镜像（前置=true 后置=false） */
+export const setCameraFlip: (flip: boolean) => void;

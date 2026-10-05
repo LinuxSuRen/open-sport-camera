@@ -109,7 +109,7 @@ struct RecordStream::Impl {
   GLuint oesTex = 0;
   GLint uTexLoc = -1;
   GLint uFlipXLoc = -1;
-  float camFlipX = 0.0f; // 前置摄像头=1.0 后置=0.0
+  std::atomic<float> camFlipX{0.0f}; // 前置摄像头=1.0 后置=0.0（运行时可切换）
   // 水印（阶段2）
   GLuint wmProgram = 0;
   GLint wmRectLoc = -1;
@@ -521,6 +521,16 @@ void RecordStream::Impl::DrawWatermark(int64_t ptsUs)
   if (quads.empty()) {
     return;
   }
+  // 诊断：打印锚点与首 quad 位置
+  {
+    static int posLogCount = 0;
+    if (posLogCount < 2) {
+      posLogCount++;
+      RS_LOG("wm anchor=%{public}d rot=%{public}d quad0=(%{public}d,%{public}d,%{public}dx%{public}d) flip=%{public}.0f",
+        wmCfg.timer.anchor, wmCfg.rotation, quads[0].dstX, quads[0].dstY,
+        quads[0].dstW, quads[0].dstH, camFlipX.load());
+    }
+  }
   static int logCount = 0;
   if (logCount < 3) {
     logCount++;
@@ -537,7 +547,12 @@ void RecordStream::Impl::DrawWatermark(int64_t ptsUs)
   glActiveTexture(GL_TEXTURE0);
   glUniform1i(wmTexLoc, 0);
   glBindVertexArray(wmQuadVao);
-  for (const auto &q : quads) {
+  for (auto q : quads) {
+    // 前置摄像头：水印位置在编码空间镜像 X（补偿 uFlipX 对相机图像的翻转）
+    if (camFlipX.load() > 0.5f) {
+      int origX = q.dstX;
+      q.dstX = width - origX - q.dstW;
+    }
     // bufferIndex：glyphs 顺序 + statics 顺序（SetWatermarkAssets 装配）
     size_t idx = SIZE_MAX;
     for (size_t i = 0; i < wmCfg.glyphs.size(); i++) {
@@ -628,7 +643,7 @@ void RecordStream::Impl::RenderLoop()
     glBindTexture(GL_TEXTURE_EXTERNAL_OES, oesTex);
     glUniform1i(uTexLoc, 0);
     if (uFlipXLoc >= 0) {
-      glUniform1f(uFlipXLoc, camFlipX);
+      glUniform1f(uFlipXLoc, camFlipX.load());
     }
     glBindVertexArray(vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
@@ -729,11 +744,11 @@ int RecordStream::Prepare(int width, int height, int fps, int bitrate, int rotat
     impl_ = nullptr;
     return -104;
   }
-  impl_->camFlipX = (rotation >= 270) ? 1.0f : 0.0f; // 前置=270 翻转
+  impl_->camFlipX.store((rotation >= 270) ? 1.0f : 0.0f);
   impl_->loopRunning.store(true);
   impl_->renderThread = std::thread(&Impl::RenderLoop, impl_);
   RS_LOG("prepared %{public}dx%{public}d@%{public}d rotation=%{public}d flip=%{public}.0f",
-    width, height, fps, rotation, impl_->camFlipX);
+    width, height, fps, rotation, impl_->camFlipX.load());
   return 0;
 }
 
@@ -1010,6 +1025,14 @@ int RecordStream::SetWatermarkAssets(const std::string &cfgJson,
   RS_LOG("watermark assets set: glyphs=%{public}zu statics=%{public}zu timer=%{public}d",
     cfg.glyphs.size(), cfg.statics.size(), cfg.timer.enabled ? 1 : 0);
   return 0;
+}
+
+void RecordStream::SetFlipX(bool flip)
+{
+  if (impl_ != nullptr) {
+    impl_->camFlipX.store(flip ? 1.0f : 0.0f);
+    RS_LOG("flipX set to %{public}.0f", flip ? 1.0f : 0.0f);
+  }
 }
 
 int RecordStream::UpdateLaps(const std::string &lapsJson)

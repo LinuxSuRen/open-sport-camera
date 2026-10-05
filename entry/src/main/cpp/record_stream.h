@@ -59,6 +59,9 @@ public:
   /** 录制中更新计圈（计圈点击时调用） */
   int UpdateLaps(const std::string &lapsJson);
 
+  /** 运行时设置水平镜像（切换前后摄像头时调用） */
+  void SetFlipX(bool flip);
+
   ~RecordStream();
 
   struct Impl;
