@@ -14,11 +14,18 @@ namespace osc {
 /** 把 quad 列表以 src-over 混合到 RGBA 帧 */
 void BlitQuads(uint8_t *rgbaFrame, int frameW, int frameH, const std::vector<DrawQuad> &quads);
 
-/** NV12/NV21 -> RGBA8888（BT.601 limited range） */
+/** NV12/NV21 -> RGBA8888（BT.601 limited range），紧凑布局 */
 void Nv12ToRgba(const uint8_t *nv12, int w, int h, uint8_t *rgba, bool nv21);
 
-/** RGBA8888 -> NV12（BT.601 limited range），输出与输入同尺寸 */
+/** RGBA8888 -> NV12（BT.601 limited range），输出与输入同尺寸，紧凑布局 */
 void RgbaToNv12(const uint8_t *rgba, int w, int h, uint8_t *nv12);
+
+/** stride 感知版本：Y 平面按 stride 行距、UV 平面位于 uvOffset */
+void Nv12ToRgbaStride(const uint8_t *data, int stride, int uvOffset, int w, int h,
+    uint8_t *rgba, bool nv21);
+
+/** stride 感知版本：按 stride/uvOffset 写入 NV12（padding 字节置 0） */
+void RgbaToNv12Stride(const uint8_t *rgba, int w, int h, uint8_t *out, int stride, int uvOffset);
 
 } // namespace osc
 

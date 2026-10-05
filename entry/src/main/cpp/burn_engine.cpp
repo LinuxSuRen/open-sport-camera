@@ -183,7 +183,18 @@ int BurnEngine::Run(const std::string &srcPath, const std::string &dstPath,
             OH_AVFormat_Destroy(decFmt);
         }
         OSC_CHECK(OH_VideoDecoder_Start(decoder));
-        MEDIA_LOG_INFO("decoder started");
+        int32_t decStride = videoW;
+        {
+            OH_AVFormat *desc = OH_VideoDecoder_GetOutputDescription(decoder);
+            if (desc != nullptr) {
+                int32_t st = 0;
+                if (OH_AVFormat_GetIntValue(desc, OH_MD_KEY_VIDEO_STRIDE, &st) && st > 0) {
+                    decStride = st;
+                }
+                OH_AVFormat_Destroy(desc);
+            }
+        }
+        MEDIA_LOG_INFO("decoder started, stride=%{public}d", decStride);
 
         // ---------- 编码器 ----------
         encoder = OH_VideoEncoder_CreateByMime("video/avc");
@@ -202,7 +213,20 @@ int BurnEngine::Run(const std::string &srcPath, const std::string &dstPath,
             OH_AVFormat_Destroy(encFmt);
         }
         OSC_CHECK(OH_VideoEncoder_Start(encoder));
-        MEDIA_LOG_INFO("encoder started");
+        int32_t encStride = videoW;
+        int32_t encUvOffset = videoW * videoH; // 先按紧凑布局，首个输入缓冲按容量校正
+        bool encLayoutResolved = false;
+        {
+            OH_AVFormat *desc = OH_VideoEncoder_GetInputDescription(encoder);
+            if (desc != nullptr) {
+                int32_t st = 0;
+                if (OH_AVFormat_GetIntValue(desc, OH_MD_KEY_VIDEO_STRIDE, &st) && st > 0) {
+                    encStride = st;
+                }
+                OH_AVFormat_Destroy(desc);
+            }
+        }
+        MEDIA_LOG_INFO("encoder started, stride=%{public}d uvOff=%{public}d", encStride, encUvOffset);
 
         // ---------- 输出 ----------
         dstFd = open(dstPath.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0644);
@@ -218,7 +242,8 @@ int BurnEngine::Run(const std::string &srcPath, const std::string &dstPath,
         OH_AVMuxer_SetRotation(muxer, cfg.rotation);
 
         std::vector<uint8_t> rgbaFrame(static_cast<size_t>(videoW) * videoH * 4);
-        std::vector<uint8_t> nv12Frame(static_cast<size_t>(videoW) * videoH * 3 / 2);
+        std::vector<uint8_t> nv12Frame(static_cast<size_t>(encUvOffset) +
+            static_cast<size_t>(encStride) * videoH / 2);
         bool muxerStarted = false;
         int32_t muxVideoTrack = -1;
         int32_t muxAudioTrack = -1;
@@ -278,10 +303,18 @@ int BurnEngine::Run(const std::string &srcPath, const std::string &dstPath,
                         if ((attr.flags & AVCODEC_BUFFER_FLAGS_EOS) != 0) {
                             decEos = true;
                         } else if (OH_AVBuffer_GetAddr(decOut) != nullptr && attr.size > 0) {
-                            Nv12ToRgba(OH_AVBuffer_GetAddr(decOut), videoW, videoH, rgbaFrame.data(), false);
+                            // 解码输出布局：UV 偏移由缓冲实际尺寸反推（size = uvOff + stride*H/2）
+                            int decUvOffset = decStride * videoH;
+                            const int minTight = decStride * videoH + decStride * videoH / 2;
+                            if (attr.size >= minTight) {
+                                decUvOffset = attr.size - decStride * videoH / 2;
+                            }
+                            Nv12ToRgbaStride(OH_AVBuffer_GetAddr(decOut), decStride, decUvOffset,
+                                videoW, videoH, rgbaFrame.data(), false);
                             std::vector<DrawQuad> quads = BuildFrameOverlays(cfg, attr.pts, videoW, videoH);
                             BlitQuads(rgbaFrame.data(), videoW, videoH, quads);
-                            RgbaToNv12(rgbaFrame.data(), videoW, videoH, nv12Frame.data());
+                            RgbaToNv12Stride(rgbaFrame.data(), videoW, videoH, nv12Frame.data(),
+                                encStride, encUvOffset);
 
                             uint32_t encInIdx = 0;
                             if (decodedFrames % 60 == 0) {
@@ -295,7 +328,18 @@ int BurnEngine::Run(const std::string &srcPath, const std::string &dstPath,
                                 if (encIn != nullptr) {
                                     uint8_t *dst = OH_AVBuffer_GetAddr(encIn);
                                     int32_t cap = OH_AVBuffer_GetCapacity(encIn);
-                                    size_t need = static_cast<size_t>(videoW) * videoH * 3 / 2;
+                                    if (!encLayoutResolved) {
+                                        // 首个输入缓冲：容量反推 UV 偏移（cap = uvOff + stride*H/2）
+                                        int32_t tight = encStride * videoH + encStride * videoH / 2;
+                                        if (cap >= tight) {
+                                            encUvOffset = cap - encStride * videoH / 2;
+                                        }
+                                        encLayoutResolved = true;
+                                        MEDIA_LOG_INFO("enc input layout: cap=%{public}d stride=%{public}d uvOff=%{public}d",
+                                            cap, encStride, encUvOffset);
+                                    }
+                                    size_t need = static_cast<size_t>(encUvOffset) +
+                                        static_cast<size_t>(encStride) * videoH / 2;
                                     if (dst != nullptr && cap >= static_cast<int32_t>(need)) {
                                         memcpy(dst, nv12Frame.data(), need);
                                         OH_AVCodecBufferAttr inAttr = {};

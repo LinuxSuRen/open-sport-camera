@@ -320,6 +320,40 @@ static void TestNv12Roundtrip()
     CHECK(maxErr <= 12); // limited-range 量化误差上限
 }
 
+static void TestStrideRoundtrip()
+{
+    printf("[stride NV12 roundtrip]\n");
+    const int W = 64;
+    const int H = 32;
+    const int stride = 64;      // 故意大于 W 模拟对齐
+    const int uvOff = stride * 32; // 高度 16 对齐（32 已对齐）
+    std::vector<uint8_t> rgba(static_cast<size_t>(W) * H * 4);
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            size_t i = (static_cast<size_t>(y) * W + x) * 4;
+            rgba[i] = static_cast<uint8_t>(x * 3 + 30);
+            rgba[i + 1] = static_cast<uint8_t>(y * 6);
+            rgba[i + 2] = 90;
+            rgba[i + 3] = 255;
+        }
+    }
+    std::vector<uint8_t> nv(stride * H + stride * H / 2, 0);
+    RgbaToNv12Stride(rgba.data(), W, H, nv.data(), stride, uvOff);
+    std::vector<uint8_t> back(static_cast<size_t>(W) * H * 4);
+    Nv12ToRgbaStride(nv.data(), stride, uvOff, W, H, back.data(), false);
+    int maxErr = 0;
+    for (size_t i = 0; i < static_cast<size_t>(W) * H; i++) {
+        for (int c = 0; c < 3; c++) {
+            int err = std::abs(static_cast<int>(back[i * 4 + c]) - static_cast<int>(rgba[i * 4 + c]));
+            if (err > maxErr) {
+                maxErr = err;
+            }
+        }
+    }
+    printf("  stride roundtrip max error = %d\n", maxErr);
+    CHECK(maxErr <= 12);
+}
+
 int main()
 {
     TestFormatTimer();
@@ -329,6 +363,7 @@ int main()
     TestLapLineSwitch();
     TestBlitter();
     TestNv12Roundtrip();
+    TestStrideRoundtrip();
     printf("\n%d checks, %d failed\n", g_total, g_failed);
     return g_failed == 0 ? 0 : 1;
 }

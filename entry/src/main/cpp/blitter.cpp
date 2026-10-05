@@ -144,3 +144,86 @@ void RgbaToNv12(const uint8_t *rgba, int w, int h, uint8_t *nv12)
 }
 
 } // namespace osc
+
+
+// ---------- stride 感知版本 ----------
+
+namespace osc {
+
+void Nv12ToRgbaStride(const uint8_t *data, int stride, int uvOffset, int w, int h,
+    uint8_t *rgba, bool nv21)
+{
+    const uint8_t *yPlane = data;
+    const uint8_t *uvPlane = data + uvOffset;
+    for (int j = 0; j < h; j++) {
+        const uint8_t *yrow = yPlane + static_cast<size_t>(j) * stride;
+        const uint8_t *uvrow = uvPlane + static_cast<size_t>(j / 2) * stride;
+        uint8_t *drow = rgba + static_cast<size_t>(j) * w * 4;
+        for (int i = 0; i < w; i++) {
+            int Y = yrow[i] - 16;
+            int U = uvrow[(i & ~1)] - 128;
+            int V = uvrow[(i & ~1) + 1] - 128;
+            if (nv21) {
+                int t = U;
+                U = V;
+                V = t;
+            }
+            int r = (298 * Y + 409 * V + 128) >> 8;
+            int g = (298 * Y - 100 * U - 208 * V + 128) >> 8;
+            int b = (298 * Y + 516 * U + 128) >> 8;
+            drow[i * 4] = Clamp8(r);
+            drow[i * 4 + 1] = Clamp8(g);
+            drow[i * 4 + 2] = Clamp8(b);
+            drow[i * 4 + 3] = 255;
+        }
+    }
+}
+
+void RgbaToNv12Stride(const uint8_t *rgba, int w, int h, uint8_t *out, int stride, int uvOffset)
+{
+    uint8_t *yPlane = out;
+    uint8_t *uvPlane = out + uvOffset;
+    for (int j = 0; j < h; j++) {
+        const uint8_t *srow = rgba + static_cast<size_t>(j) * w * 4;
+        uint8_t *drow = yPlane + static_cast<size_t>(j) * stride;
+        for (int i = 0; i < w; i++) {
+            int r = srow[i * 4];
+            int g = srow[i * 4 + 1];
+            int b = srow[i * 4 + 2];
+            drow[i] = Clamp8(((66 * r + 129 * g + 25 * b + 128) >> 8) + 16);
+        }
+    }
+    // 行尾 padding 置中性值
+    for (int j = 0; j < h; j++) {
+        uint8_t *drow = yPlane + static_cast<size_t>(j) * stride;
+        for (int i = w; i < stride; i++) {
+            drow[i] = 16;
+        }
+    }
+    int uvRows = (h + 1) / 2;
+    for (int j = 0; j < uvRows; j++) {
+        uint8_t *duv = uvPlane + static_cast<size_t>(j) * stride;
+        for (int i = 0; i < w / 2; i++) {
+            int r = 0, g = 0, b = 0;
+            for (int dy = 0; dy < 2; dy++) {
+                const uint8_t *srow = rgba + static_cast<size_t>(j * 2 + dy) * w * 4;
+                for (int dx = 0; dx < 2; dx++) {
+                    int idx = (i * 2 + dx) * 4;
+                    r += srow[idx];
+                    g += srow[idx + 1];
+                    b += srow[idx + 2];
+                }
+            }
+            r /= 4;
+            g /= 4;
+            b /= 4;
+            duv[i * 2] = Clamp8(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128);
+            duv[i * 2 + 1] = Clamp8(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128);
+        }
+        for (int i = w; i < stride; i++) {
+            duv[i] = 128;
+        }
+    }
+}
+
+} // namespace osc
