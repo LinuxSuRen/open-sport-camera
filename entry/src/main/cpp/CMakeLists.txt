@@ -19,6 +19,7 @@ add_library(burn SHARED
     record_stream.cpp
     rtsp_server.cpp
     onvif_server.cpp
+    audio_pipeline.cpp
 )
 
 find_library(
@@ -37,6 +38,8 @@ target_link_libraries(burn PUBLIC
     libnative_media_vdec.so
     libnative_media_venc.so
     libnative_media_codecbase.so
+    libnative_media_aenc.so
+    libohaudio.so
     libnative_media_core.so
     libnative_media_avsource.so
     libnative_media_avdemuxer.so

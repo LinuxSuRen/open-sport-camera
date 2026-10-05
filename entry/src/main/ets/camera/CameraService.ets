@@ -38,6 +38,7 @@ export class CameraService {
   private device?: camera.CameraDevice;
   private context?: common.Context;
   private previewSurfaceId: string = '';
+  private videoSurfaceId: string = '';
   private position: camera.CameraPosition = camera.CameraPosition.CAMERA_POSITION_BACK;
 
   private chosenPreviewProfile?: camera.Profile;
@@ -90,6 +91,7 @@ export class CameraService {
     this.session.beginConfig();
     this.session.addInput(this.input);
     this.session.addOutput(this.previewOutput);
+    this.videoSurfaceId = videoSurfaceId ?? '';
     if (videoSurfaceId !== undefined && videoSurfaceId.length > 0) {
       this.persistentVideoOutput = this.manager.createVideoOutput(this.chosenVideoProfile,
         videoSurfaceId);
@@ -118,13 +120,18 @@ export class CameraService {
       this.chosenPreviewProfile.size.width, this.chosenPreviewProfile.size.height, this.chosenStabMode);
   }
 
-  /** 切换前后摄：重建会话 */
+  /**
+   * 切换前后摄：重建会话（预览 surface 与视频流 surface 不变，实时管线无感知）。
+   * 录制中可安全切换：管线的 NativeImage surface 由我们持有，
+   * 相机会话重建只影响写入端，不影响消费端。
+   */
   async switchCamera(position: camera.CameraPosition): Promise<void> {
     if (!this.manager || !this.context) {
       return;
     }
     await this.releaseSession();
-    await this.open(this.context, this.previewSurfaceId, position);
+    await this.open(this.context, this.previewSurfaceId, position, undefined,
+      this.videoSurfaceId.length > 0 ? this.videoSurfaceId : undefined);
   }
 
   getCameraPosition(): camera.CameraPosition {
@@ -306,13 +313,14 @@ export class CameraService {
     return this.device !== undefined ? this.device.cameraId : '';
   }
 
-  /** 切换到指定镜头（重建会话） */
+  /** 切换到指定镜头（重建会话，视频流 surface 保持不断） */
   async switchLens(cameraId: string): Promise<void> {
     if (!this.manager || !this.context) {
       return;
     }
     await this.releaseSession();
-    await this.open(this.context, this.previewSurfaceId, this.position, cameraId);
+    await this.open(this.context, this.previewSurfaceId, this.position, cameraId,
+      this.videoSurfaceId.length > 0 ? this.videoSurfaceId : undefined);
   }
 
   /** 预览 profile：16:9 优先、宽度不超过 1920 中最大 */

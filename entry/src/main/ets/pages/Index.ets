@@ -517,7 +517,7 @@ struct Index {
   }
 
   private async pickLens(cameraId: string): Promise<void> {
-    if (this.recording || cameraId === this.currentLensId) {
+    if (cameraId === this.currentLensId) {
       return;
     }
     try {
@@ -530,9 +530,10 @@ struct Index {
   }
 
   private async switchCamera(): Promise<void> {
-    if (this.recording || !this.cameraReady) {
+    if (!this.cameraReady) {
       return;
     }
+    // 录制中允许切换：视频流 surface 常挂不受影响，画面会短暂卡顿后恢复
     const next = this.frontCamera
       ? camera.CameraPosition.CAMERA_POSITION_BACK
       : camera.CameraPosition.CAMERA_POSITION_FRONT;
@@ -541,7 +542,9 @@ struct Index {
       this.frontCamera = !this.frontCamera;
       this.lensList = this.cameraService.getLensList();
       this.currentLensId = this.cameraService.getCurrentCameraId();
+      this.showBanner('已切换到' + (this.frontCamera ? '前置' : '后置') + '摄像头');
     } catch (e) {
+      hilog.error(DOMAIN, TAG, 'switchCamera failed: %{public}s', JSON.stringify(e));
       this.showBanner('切换摄像头失败');
     }
   }

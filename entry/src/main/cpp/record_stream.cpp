@@ -29,6 +29,7 @@
 #include "blitter.h"
 #include "codec_common.h"
 #include "rtsp_server.h"
+#include "audio_pipeline.h"
 #include "mini_json.h"
 #include "overlay_layout.h"
 
@@ -132,6 +133,9 @@ struct RecordStream::Impl {
   std::mutex encOutMtx;
   std::vector<uint8_t> spsNal;
   std::vector<uint8_t> ppsNal;
+  int32_t audioTrack = -1;
+  std::vector<uint8_t> audioCsd;
+  int64_t firstVideoTsWall = -1; // ms 墙钟：视频CSD后等待音频Csd的超时基准
 
   // 封装
   int outFd = -1;
@@ -214,7 +218,16 @@ static void OnEncodedOutput(RecordStream::Impl *impl, OH_AVCodec *codec, uint32_
       RtspServer::Instance().OnFrame(data, attr.size, attr.pts, isKey);
     }
     const bool isCodecData = (attr.flags & AVCODEC_BUFFER_FLAGS_CODEC_DATA) != 0;
-    if (!impl->muxerStarted && !impl->spsNal.empty() && !impl->ppsNal.empty() && !isCodecData) {
+    bool audioOk = impl->audioTrack >= 0 ||
+      (impl->firstVideoTsWall > 0 &&
+        (std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch()).count() - impl->firstVideoTsWall) > 300);
+    if (impl->firstVideoTsWall < 0) {
+      impl->firstVideoTsWall = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+    if (!impl->muxerStarted && !impl->spsNal.empty() && !impl->ppsNal.empty() && !isCodecData &&
+        audioOk) {
       std::vector<uint8_t> csd = BuildAvcCsd(impl->spsNal, impl->ppsNal);
       OH_AVFormat *vfmt = OH_AVFormat_CreateVideoFormat("video/avc", impl->width, impl->height);
       OH_AVFormat_SetIntValue(vfmt, OH_MD_KEY_FRAME_RATE, impl->fps);
@@ -744,6 +757,44 @@ int RecordStream::Begin(const std::string &outPath)
     impl_->outFd = -1;
     return -105;
   }
+  impl_->audioTrack = -1;
+  impl_->audioCsd.clear();
+  impl_->firstVideoTsWall = -1;
+  // AAC 音频：CSD 建轨（须在 muxer Start 前）+ 帧写入
+  AudioPipeline::Instance().Start([impl = impl_](const uint8_t *data, size_t size, int64_t ptsUs,
+      bool isCsd) {
+    std::lock_guard<std::mutex> lock(impl->encOutMtx);
+    if (isCsd) {
+      if (impl->audioTrack < 0 && !impl->muxerStarted && impl->muxer != nullptr) {
+        OH_AVFormat *afmt = OH_AVFormat_CreateAudioFormat("audio/mp4a-latm", 48000, 2);
+        OH_AVFormat_SetBuffer(afmt, OH_MD_KEY_CODEC_CONFIG, data, size);
+        if (OH_AVMuxer_AddTrack(impl->muxer, &impl->audioTrack, afmt) == AV_ERR_OK) {
+          RS_LOG("audio track added");
+        } else {
+          impl->audioTrack = -1;
+        }
+        OH_AVFormat_Destroy(afmt);
+      }
+      return;
+    }
+    if (!impl->muxerStarted || impl->audioTrack < 0 || impl->muxer == nullptr) {
+      return;
+    }
+    OH_AVBuffer *abuf = OH_AVBuffer_Create(static_cast<int32_t>(size));
+    if (abuf == nullptr) {
+      return;
+    }
+    uint8_t *dst = OH_AVBuffer_GetAddr(abuf);
+    if (dst != nullptr) {
+      memcpy(dst, data, size);
+      OH_AVCodecBufferAttr attr = {};
+      attr.size = static_cast<int32_t>(size);
+      attr.pts = ptsUs;
+      OH_AVBuffer_SetBufferAttr(abuf, &attr);
+      OH_AVMuxer_WriteSampleBuffer(impl->muxer, static_cast<uint32_t>(impl->audioTrack), abuf);
+    }
+    OH_AVBuffer_Destroy(abuf);
+  });
   impl_->running.store(true);
   impl_->frameCv.notify_all();
   RS_LOG("begin: %{public}s", outPath.c_str());
@@ -759,6 +810,7 @@ RecordStats RecordStream::Stop()
   }
   impl_->running.store(false);
   impl_->frameCv.notify_all();
+  AudioPipeline::Instance().Stop();
   // 缓冲+同步模式 EOS：空缓冲+标记推送
   {
     uint32_t eosIdx = 0;
