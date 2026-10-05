@@ -211,8 +211,12 @@ int AudioPipeline::Start(const AacSink &sink)
   OH_AVErrCode cfgCode = OH_AudioEncoder_Configure(impl_->encoder, fmt);
   OH_AVFormat_Destroy(fmt);
   if (cfgCode != AV_ERR_OK) {
-    AU_ERR("aac configure failed, code=%{public}d", cfgCode);
-    return -4;
+    AU_LOG("aac configure not supported (code=%{public}d), video-only mode", cfgCode);
+    // 优雅降级：清理并返回成功（管线继续，无声录制）
+    OH_AudioEncoder_Destroy(impl_->encoder);
+    impl_->encoder = nullptr;
+    impl_->running.store(true);
+    return 0;
   }
   OH_AVFormat_Destroy(fmt);
   OH_AVCodecAsyncCallback cb = {};

@@ -84,6 +84,10 @@ hvigorw assembleHap --mode module -p product=default -p buildMode=debug --no-dae
 - 支持 ONVIF 的 NVR/软件（如 ONVIF Device Manager、蓝鲨等）可自动发现设备「OpenSportCamera」并直接取得 RTSP 地址
 - SOAP 服务端口 8000，WS-Discovery 组播 239.255.255.250:3702
 
+## 录制没有声音？
+
+部分机型的 native AVCodecService 只注册了视频编解码器（如 SGT-AL50 只有 OMX.hisi.video.encoder.avc），没有 native AAC 音频编码器。应用会自动降级为无声录制，不影响视频质量。待设备/SDK 更新后可恢复。
+
 ## 调试工具
 
 ```bash

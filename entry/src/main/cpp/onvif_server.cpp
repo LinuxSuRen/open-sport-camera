@@ -193,6 +193,9 @@ std::string OnvifServer::Impl::HandleSoap(const std::string &req)
 
 void OnvifServer::Impl::HandleHttp(int fd)
 {
+  // 超时保护：3秒未收到完整请求则断开（防连接堆积假死）
+  struct timeval tv = {3, 0};
+  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
   char buf[8192] = {0};
   std::string req;
   while (req.find("\r\n\r\n") == std::string::npos && req.size() < 16384) {
