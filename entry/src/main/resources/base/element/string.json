@@ -17,6 +17,10 @@
       "value": "用于拍摄运动视频"
     },
     {
+      "name": "internet_perm_reason",
+      "value": "用于局域网 RTSP 实时推流"
+    },
+    {
       "name": "mic_perm_reason",
       "value": "用于录制视频声音"
     },

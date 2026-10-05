@@ -14,6 +14,7 @@
 
 #include "burn_engine.h"
 #include "record_stream.h"
+#include "rtsp_server.h"
 #include "mini_json.h"
 #include "overlay_layout.h"
 
@@ -378,6 +379,47 @@ static napi_value NapiUpdateWatermarkLaps(napi_env env, napi_callback_info info)
     return result;
 }
 
+
+static napi_value NapiStartRtsp(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    int32_t port = 8554;
+    if (argc >= 1) {
+        napi_get_value_int32(env, args[0], &port);
+    }
+    int code = osc::RtspServer::Instance().Start(port);
+    napi_value result = nullptr;
+    napi_create_int32(env, code, &result);
+    return result;
+}
+
+static napi_value NapiStopRtsp(napi_env env, napi_callback_info info)
+{
+    (void)env;
+    (void)info;
+    osc::RtspServer::Instance().Stop();
+    return nullptr;
+}
+
+static napi_value NapiRtspStatus(napi_env env, napi_callback_info info)
+{
+    (void)info;
+    napi_value result = nullptr;
+    napi_create_object(env, &result);
+    napi_value running = nullptr;
+    napi_get_boolean(env, osc::RtspServer::Instance().IsRunning(), &running);
+    napi_set_named_property(env, result, "running", running);
+    napi_value hasClient = nullptr;
+    napi_get_boolean(env, osc::RtspServer::Instance().HasClient(), &hasClient);
+    napi_set_named_property(env, result, "hasClient", hasClient);
+    napi_value port = nullptr;
+    napi_create_int32(env, osc::RtspServer::Instance().GetPort(), &port);
+    napi_set_named_property(env, result, "port", port);
+    return result;
+}
+
 } // namespace} // namespace
 
 EXTERN_C_START
@@ -391,6 +433,9 @@ static napi_value Init(napi_env env, napi_value exports)
         {"releaseRecord", nullptr, NapiReleaseRecord, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setWatermarkAssets", nullptr, NapiSetWatermarkAssets, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"updateWatermarkLaps", nullptr, NapiUpdateWatermarkLaps, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"startRtsp", nullptr, NapiStartRtsp, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"stopRtsp", nullptr, NapiStopRtsp, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"rtspStatus", nullptr, NapiRtspStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;

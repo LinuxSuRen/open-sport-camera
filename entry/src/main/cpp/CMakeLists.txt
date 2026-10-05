@@ -17,6 +17,7 @@ add_library(burn SHARED
     codec_common.cpp
     burn_engine.cpp
     record_stream.cpp
+    rtsp_server.cpp
 )
 
 find_library(

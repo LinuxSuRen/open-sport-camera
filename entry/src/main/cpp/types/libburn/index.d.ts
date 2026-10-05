@@ -37,3 +37,18 @@ export const setWatermarkAssets: (cfgJson: string, buffers: ArrayBuffer[]) => nu
 
 /** 录制中更新计圈数据 */
 export const updateWatermarkLaps: (lapsJson: string) => number;
+
+/** 阶段3：启动 RTSP 推流服务器（局域网内 VLC 可拉流） */
+export const startRtsp: (port: number) => number;
+
+/** 停止 RTSP 服务器 */
+export const stopRtsp: () => void;
+
+export interface RtspStatus {
+  running: boolean;
+  hasClient: boolean;
+  port: number;
+}
+
+/** RTSP 服务器状态 */
+export const rtspStatus: () => RtspStatus;

@@ -1,6 +1,7 @@
 import { CameraService } from '../camera/CameraService';
 import { RecorderService, RecordSize } from '../record/RecorderService';
 import { StreamRecorderService } from '../record/StreamRecorderService';
+import { RtspService } from '../record/RtspService';
 import { LensInfo } from '../camera/CameraService';
 import { SwimTimer, TimerState, formatTimer, formatLapLine, LapRecord } from '../timer/SwimTimer';
 import { WatermarkOverlay } from '../watermark/WatermarkOverlay';
@@ -91,6 +92,7 @@ struct Index {
   @State currentLensId: string = '';
   /** 实验室开关：实时管线（阶段1：无水印直录；阶段2 起水印入流） */
   @State useStreamPipeline: boolean = true;
+  @State rtspEnabled: boolean = false;
   @State banner: string = '';
   @State burnPhase: BurnPhase = 'idle';
   @State burnPct: number = 0;
@@ -238,6 +240,15 @@ struct Index {
           .padding({ left: 10, right: 10, top: 4, bottom: 4 })
         }
         Blank()
+        if (this.rtspEnabled) {
+          Text('RTSP')
+            .fontSize(12)
+            .fontColor('#FFD200')
+            .border({ width: 1, color: '#66FFD200' })
+            .borderRadius(8)
+            .padding({ left: 6, right: 6, top: 2, bottom: 2 })
+            .margin({ right: 6 })
+        }
         if (this.eisEnabled) {
           Text('防抖')
             .fontSize(12)
@@ -336,6 +347,28 @@ struct Index {
       .onClick(() => {
         this.swimTimer.reset();
         this.refreshTimerTexts();
+      })
+
+      Blank()
+
+      // RTSP 推流开关
+      Column() {
+        Text('📡').fontSize(22).fontColor(this.rtspEnabled ? '#FFD200' : '#FFFFFF')
+        Text('推流').fontSize(11).fontColor('#CCCCCC').margin({ top: 4 })
+      }
+      .onClick(() => {
+        if (this.rtspEnabled) {
+          RtspService.stop();
+          this.rtspEnabled = false;
+          this.showBanner('RTSP 推流已停止');
+        } else {
+          if (RtspService.start(8554)) {
+            this.rtspEnabled = true;
+            this.showBanner('推流已开启：rtsp://本机IP:8554/live（同 Wi-Fi 用 VLC 打开）');
+          } else {
+            this.showBanner('推流启动失败（端口被占用？）');
+          }
+        }
       })
 
       Blank()

@@ -28,6 +28,7 @@
 
 #include "blitter.h"
 #include "codec_common.h"
+#include "rtsp_server.h"
 #include "mini_json.h"
 #include "overlay_layout.h"
 
@@ -206,6 +207,11 @@ static void OnEncodedOutput(RecordStream::Impl *impl, OH_AVCodec *codec, uint32_
   } else if (data != nullptr && attr.size > 0) {
     if (impl->spsNal.empty() || impl->ppsNal.empty()) {
       CollectAvcCsd(data, attr.size, impl->spsNal, impl->ppsNal);
+    }
+    // 阶段3：RTSP 推流分发（服务器运行中才走）
+    if (RtspServer::Instance().IsRunning()) {
+      bool isKey = (attr.flags & AVCODEC_BUFFER_FLAGS_SYNC_FRAME) != 0;
+      RtspServer::Instance().OnFrame(data, attr.size, attr.pts, isKey);
     }
     const bool isCodecData = (attr.flags & AVCODEC_BUFFER_FLAGS_CODEC_DATA) != 0;
     if (!impl->muxerStarted && !impl->spsNal.empty() && !impl->ppsNal.empty() && !isCodecData) {
