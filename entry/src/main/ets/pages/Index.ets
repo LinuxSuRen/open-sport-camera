@@ -10,6 +10,7 @@ import { BurnService } from '../burn/BurnService';
 import { BurnGlyph, BurnStaticImage, BurnLapInfo } from '../burn/BurnTypes';
 import { GalleryService } from '../gallery/GalleryService';
 import { common } from '@kit.AbilityKit';
+import { fileIo } from '@kit.CoreFileKit';
 import { abilityAccessCtrl, Permissions } from '@kit.AbilityKit';
 import { camera } from '@kit.CameraKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
@@ -146,7 +147,6 @@ struct Index {
     .height('100%')
     .backgroundColor('#000000')
     .bindSheet($$this.showSettings, this.SettingsBuilder(), {
-      height: SheetSize.MEDIUM + SheetSize.LARGE,
       detents: [SheetSize.MEDIUM, SheetSize.LARGE],
       blurStyle: BlurStyle.NONE,
       backgroundColor: '#00000000',
@@ -577,6 +577,8 @@ struct Index {
 
       this.burnPhase = 'saving';
       await GalleryService.saveVideo(this.context, dstPath);
+      this.cleanupFile(srcPath);
+      this.cleanupFile(dstPath);
       this.burnPhase = 'done';
       this.burnMsg = '视频已保存到相册（含水印）';
     } catch (e) {
@@ -660,6 +662,16 @@ struct Index {
         this.banner = '';
       }
     }, 2600);
+  }
+
+  private cleanupFile(path: string): void {
+    try {
+      if (path.length > 0 && fileIo.accessSync(path)) {
+        fileIo.unlinkSync(path);
+      }
+    } catch (e) {
+      // 清理失败不影响主流程
+    }
   }
 
   private sleep(ms: number): Promise<void> {
