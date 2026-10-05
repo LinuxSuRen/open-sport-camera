@@ -245,11 +245,11 @@ static void OnEncodedOutput(RecordStream::Impl *impl, OH_AVCodec *codec, uint32_
       OH_AVFormat *vfmt = OH_AVFormat_CreateVideoFormat("video/avc", impl->width, impl->height);
       OH_AVFormat_SetIntValue(vfmt, OH_MD_KEY_FRAME_RATE, impl->fps);
       OH_AVFormat_SetBuffer(vfmt, OH_MD_KEY_CODEC_CONFIG, csd.data(), csd.size());
-      if (OH_AVMuxer_AddTrack(impl->muxer, &impl->videoTrack, vfmt) != AV_ERR_OK) {
+      if (impl->muxer != nullptr && OH_AVMuxer_AddTrack(impl->muxer, &impl->videoTrack, vfmt) != AV_ERR_OK) {
         RS_ERR("add video track failed");
       }
       OH_AVFormat_Destroy(vfmt);
-      if (OH_AVMuxer_Start(impl->muxer) != AV_ERR_OK) {
+      if (impl->muxer != nullptr && OH_AVMuxer_Start(impl->muxer) != AV_ERR_OK) {
         RS_ERR("muxer start failed");
       } else {
         impl->muxerStarted = true;
@@ -769,17 +769,20 @@ int RecordStream::Begin(const std::string &outPath)
   if (impl_ == nullptr || impl_->running.load()) {
     return -110;
   }
-  impl_->outFd = open(outPath.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0644);
-  if (impl_->outFd < 0) {
-    return -102;
+  const bool streamOnly = outPath.empty();
+  if (!streamOnly) {
+    impl_->outFd = open(outPath.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (impl_->outFd < 0) {
+      return -102;
+    }
+    impl_->muxer = OH_AVMuxer_Create(impl_->outFd, AV_OUTPUT_FORMAT_MPEG_4);
+    if (impl_->muxer == nullptr) {
+      close(impl_->outFd);
+      impl_->outFd = -1;
+      return -103;
+    }
+    OH_AVMuxer_SetRotation(impl_->muxer, 0);
   }
-  impl_->muxer = OH_AVMuxer_Create(impl_->outFd, AV_OUTPUT_FORMAT_MPEG_4);
-  if (impl_->muxer == nullptr) {
-    close(impl_->outFd);
-    impl_->outFd = -1;
-    return -103;
-  }
-  OH_AVMuxer_SetRotation(impl_->muxer, 0); // GL 已旋转，无需元数据
   {
     std::lock_guard<std::mutex> lock(impl_->encOutMtx);
     impl_->muxerStarted = false;
@@ -883,15 +886,19 @@ RecordStats RecordStream::Stop()
   OH_VideoEncoder_Stop(impl_->encoder);
   {
     std::lock_guard<std::mutex> lock(impl_->encOutMtx);
-    if (impl_->muxerStarted) {
+    if (impl_->muxer != nullptr && impl_->muxerStarted) {
       OH_AVMuxer_Stop(impl_->muxer);
     }
     impl_->muxerStarted = false;
   }
-  OH_AVMuxer_Destroy(impl_->muxer);
-  impl_->muxer = nullptr;
-  close(impl_->outFd);
-  impl_->outFd = -1;
+  if (impl_->muxer != nullptr) {
+    OH_AVMuxer_Destroy(impl_->muxer);
+    impl_->muxer = nullptr;
+  }
+  if (impl_->outFd >= 0) {
+    close(impl_->outFd);
+    impl_->outFd = -1;
+  }
   stats.frames = impl_->frameCount.load();
   if (impl_->firstTs >= 0 && impl_->lastTs >= impl_->firstTs) {
     stats.durationMs = (impl_->lastTs - impl_->firstTs) / 1000000;

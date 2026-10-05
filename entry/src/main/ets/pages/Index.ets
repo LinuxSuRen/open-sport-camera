@@ -359,11 +359,13 @@ struct Index {
       .onClick(() => {
         if (this.rtspEnabled) {
           RtspService.stop();
+          StreamRecorderService.endStream();
           this.rtspEnabled = false;
           this.showBanner('RTSP 推流已停止');
         } else {
           if (RtspService.start(8554)) {
             this.rtspEnabled = true;
+            StreamRecorderService.beginStream();
             this.showBanner('推流已开启：ONVIF 可自动发现，地址 rtsp://本机IP:8554/live');
           } else {
             this.showBanner('推流启动失败（端口被占用？）');

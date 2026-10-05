@@ -27,6 +27,7 @@ export class StreamRecorderService {
 
   private static prepared = false;
   private static recording = false;
+  private static streamOnly = false;
   private static filePath = '';
 
   static isPrepared(): boolean {
@@ -51,6 +52,22 @@ export class StreamRecorderService {
 
   static getFilePath(): string {
     return StreamRecorderService.filePath;
+  }
+
+  /** 纯推流：只编码供流不存文件（推流开关开启时调用，SPS/PPS 即刻就绪） */
+  static beginStream(): void {
+    if (!StreamRecorderService.prepared || StreamRecorderService.streamOnly) {
+      return;
+    }
+    burn.beginRecord('');
+    StreamRecorderService.streamOnly = true;
+  }
+
+  static endStream(): void {
+    if (StreamRecorderService.streamOnly) {
+      burn.stopRecord();
+      StreamRecorderService.streamOnly = false;
+    }
   }
 
   static begin(context: common.Context): string {
