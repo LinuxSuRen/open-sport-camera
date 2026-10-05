@@ -6,6 +6,14 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 const TAG: string = 'CameraService';
 const DOMAIN: number = 0x0001;
 
+/** 可切换镜头（多摄手机：主摄/超广/长焦） */
+export interface LensInfo {
+  cameraId: string;
+  /** camera.CameraType 数值：0 主摄 1 广角 2 超广 3 长焦 */
+  type: number;
+  label: string;
+}
+
 export interface VideoProfileInfo {
   width: number;
   height: number;
@@ -25,9 +33,12 @@ export class CameraService {
   private session?: camera.VideoSession;
   private input?: camera.CameraInput;
   private previewOutput?: camera.PreviewOutput;
+  /** 常挂视频流（实时管线：开机挂载，永不重配） */
+  private persistentVideoOutput?: camera.VideoOutput;
   private device?: camera.CameraDevice;
   private context?: common.Context;
   private previewSurfaceId: string = '';
+  private videoSurfaceId: string = '';
   private position: camera.CameraPosition = camera.CameraPosition.CAMERA_POSITION_BACK;
 
   private chosenPreviewProfile?: camera.Profile;
@@ -35,7 +46,8 @@ export class CameraService {
   private chosenStabMode: number = 0;
 
   async open(context: common.Context, surfaceId: string,
-    position: camera.CameraPosition): Promise<void> {
+    position: camera.CameraPosition, cameraId?: string,
+    videoSurfaceId?: string): Promise<void> {
     this.context = context;
     this.previewSurfaceId = surfaceId;
     this.position = position;
@@ -45,7 +57,18 @@ export class CameraService {
     if (devices.length === 0) {
       throw new Error('未找到可用摄像头');
     }
-    this.device = this.pickDevice(devices, position);
+    if (cameraId !== undefined) {
+      // 指定镜头精确切换
+      for (const d of devices) {
+        if (d.cameraId === cameraId) {
+          this.device = d;
+          break;
+        }
+      }
+    }
+    if (this.device === undefined) {
+      this.device = this.pickDevice(devices, position);
+    }
 
     this.input = this.manager.createCameraInput(this.device);
     await this.input.open();
@@ -62,34 +85,53 @@ export class CameraService {
     // begin/commit 事务内调用；提交后另开事务设置会抛 7400103；
     // isVideoStabilizationModeSupported 必须在事务外（已提交态）调用。
     this.session = this.manager.createSession<camera.VideoSession>(camera.SceneMode.NORMAL_VIDEO);
-    // 首个事务保持绝对干净：仅输入+预览输出。
-    // 任何失败调用（如 EIS 设置）都可能给流配置留下半损坏状态，导致预览冻结。
+    // 首个事务保持绝对干净：输入 + 预览输出 +（可选）常挂视频流。
+    // 视频流开机常挂是实时管线的核心：相机拓扑此后永不变，
+    // 根治动态挂流引发的预览冻结与录制花屏。
     this.session.beginConfig();
     this.session.addInput(this.input);
     this.session.addOutput(this.previewOutput);
+    this.videoSurfaceId = videoSurfaceId ?? '';
+    if (videoSurfaceId !== undefined && videoSurfaceId.length > 0) {
+      this.persistentVideoOutput = this.manager.createVideoOutput(this.chosenVideoProfile,
+        videoSurfaceId);
+      this.session.addOutput(this.persistentVideoOutput);
+    }
     await this.session.commitConfig();
     await this.session.start();
+    if (this.persistentVideoOutput !== undefined) {
+      await this.persistentVideoOutput.start();
+    }
     // EIS 探测：在已提交的空闲态调用（无活事务，失败不损伤流状态）。
     // 真机教训：活事务内任何失败调用都会给流留下半损坏状态（预览冻结）。
     this.chosenStabMode = 0;
-    try {
-      this.session.setVideoStabilizationMode(camera.VideoStabilizationMode.AUTO);
-      this.chosenStabMode = camera.VideoStabilizationMode.AUTO as number;
-    } catch (e) {
-      hilog.info(DOMAIN, TAG, 'EIS not available on this device (outside-transaction probe)');
+    // 诊断开关：EIS 在本设备固件上疑似使视频流停帧，暂关
+    const eisEnabled = false;
+    if (eisEnabled) {
+      try {
+        this.session.setVideoStabilizationMode(camera.VideoStabilizationMode.AUTO);
+        this.chosenStabMode = camera.VideoStabilizationMode.AUTO as number;
+      } catch (e) {
+        hilog.info(DOMAIN, TAG, 'EIS not available on this device (outside-transaction probe)');
+      }
     }
     hilog.info(DOMAIN, TAG,
       'camera session started, preview=%{public}dx%{public}d stab=%{public}d',
       this.chosenPreviewProfile.size.width, this.chosenPreviewProfile.size.height, this.chosenStabMode);
   }
 
-  /** 切换前后摄：重建会话 */
+  /**
+   * 切换前后摄：重建会话（预览 surface 与视频流 surface 不变，实时管线无感知）。
+   * 录制中可安全切换：管线的 NativeImage surface 由我们持有，
+   * 相机会话重建只影响写入端，不影响消费端。
+   */
   async switchCamera(position: camera.CameraPosition): Promise<void> {
     if (!this.manager || !this.context) {
       return;
     }
     await this.releaseSession();
-    await this.open(this.context, this.previewSurfaceId, position);
+    await this.open(this.context, this.previewSurfaceId, position, undefined,
+      this.videoSurfaceId.length > 0 ? this.videoSurfaceId : undefined);
   }
 
   getCameraPosition(): camera.CameraPosition {
@@ -178,19 +220,107 @@ export class CameraService {
     } finally {
       this.session = undefined;
       this.previewOutput = undefined;
+      this.persistentVideoOutput = undefined;
       this.input = undefined;
       this.device = undefined;
     }
   }
 
+  /**
+   * 选型规则（多摄安全）：
+   * - 仅内置摄像头；排除 TRUE_DEPTH（深度传感器不能录视频）
+   * - 同位置多镜头时按 主摄 > 广角 > 超广 > 长焦 优先
+   */
   private pickDevice(devices: camera.CameraDevice[],
     position: camera.CameraPosition): camera.CameraDevice {
+    const typeScore = (t: camera.CameraType): number => {
+      if (t === camera.CameraType.CAMERA_TYPE_DEFAULT) {
+        return 4;
+      }
+      if (t === camera.CameraType.CAMERA_TYPE_WIDE_ANGLE) {
+        return 3;
+      }
+      if (t === camera.CameraType.CAMERA_TYPE_ULTRA_WIDE) {
+        return 2;
+      }
+      if (t === camera.CameraType.CAMERA_TYPE_TELEPHOTO) {
+        return 1;
+      }
+      return -1; // 深度等弃用
+    };
+    let best: camera.CameraDevice | undefined = undefined;
+    let bestScore = -1;
+    for (const d of devices) {
+      if (d.cameraPosition !== position) {
+        continue;
+      }
+      if (d.connectionType !== camera.ConnectionType.CAMERA_CONNECTION_BUILT_IN) {
+        continue;
+      }
+      const score = typeScore(d.cameraType);
+      if (score > bestScore) {
+        bestScore = score;
+        best = d;
+      }
+    }
+    if (best !== undefined) {
+      return best;
+    }
+    // 兜底：位置匹配的第一个（个别设备类型标注缺失）
     for (const d of devices) {
       if (d.cameraPosition === position) {
         return d;
       }
     }
     return devices[0];
+  }
+
+  /** 当前位置可用镜头列表（主摄/超广/长焦，排除深度） */
+  getLensList(position?: camera.CameraPosition): LensInfo[] {
+    if (!this.manager) {
+      return [];
+    }
+    const pos = position ?? this.position;
+    const devices = this.manager.getSupportedCameras();
+    const list: LensInfo[] = [];
+    for (const d of devices) {
+      if (d.cameraPosition !== pos) {
+        continue;
+      }
+      if (d.connectionType !== camera.ConnectionType.CAMERA_CONNECTION_BUILT_IN) {
+        continue;
+      }
+      if (d.cameraType === camera.CameraType.CAMERA_TYPE_TRUE_DEPTH) {
+        continue;
+      }
+      let label = '镜头';
+      if (d.cameraType === camera.CameraType.CAMERA_TYPE_DEFAULT) {
+        label = '1x';
+      } else if (d.cameraType === camera.CameraType.CAMERA_TYPE_WIDE_ANGLE) {
+        label = '广角';
+      } else if (d.cameraType === camera.CameraType.CAMERA_TYPE_ULTRA_WIDE) {
+        label = '0.6x';
+      } else if (d.cameraType === camera.CameraType.CAMERA_TYPE_TELEPHOTO) {
+        label = '长焦';
+      }
+      const info: LensInfo = { cameraId: d.cameraId, type: d.cameraType as number, label: label };
+      list.push(info);
+    }
+    return list;
+  }
+
+  getCurrentCameraId(): string {
+    return this.device !== undefined ? this.device.cameraId : '';
+  }
+
+  /** 切换到指定镜头（重建会话，视频流 surface 保持不断） */
+  async switchLens(cameraId: string): Promise<void> {
+    if (!this.manager || !this.context) {
+      return;
+    }
+    await this.releaseSession();
+    await this.open(this.context, this.previewSurfaceId, this.position, cameraId,
+      this.videoSurfaceId.length > 0 ? this.videoSurfaceId : undefined);
   }
 
   /** 预览 profile：16:9 优先、宽度不超过 1920 中最大 */

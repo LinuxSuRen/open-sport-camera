@@ -14,7 +14,12 @@ add_library(burn SHARED
     mini_json.cpp
     overlay_layout.cpp
     blitter.cpp
+    codec_common.cpp
     burn_engine.cpp
+    record_stream.cpp
+    rtsp_server.cpp
+    onvif_server.cpp
+    audio_pipeline.cpp
 )
 
 find_library(
@@ -33,10 +38,17 @@ target_link_libraries(burn PUBLIC
     libnative_media_vdec.so
     libnative_media_venc.so
     libnative_media_codecbase.so
+    libnative_media_aenc.so
+    libohaudio.so
     libnative_media_core.so
     libnative_media_avsource.so
     libnative_media_avdemuxer.so
     libnative_media_avmuxer.so
+    libEGL.so
+    libGLESv3.so
+    libnative_image.so
+    libnative_window.so
+    libace_ndk.z.so
 )
 
 target_include_directories(burn PUBLIC ${NATIVERENDER_ROOT_PATH})

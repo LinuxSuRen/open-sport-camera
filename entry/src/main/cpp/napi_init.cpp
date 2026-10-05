@@ -13,6 +13,9 @@
 #include "napi/native_api.h"
 
 #include "burn_engine.h"
+#include "record_stream.h"
+#include "rtsp_server.h"
+#include "onvif_server.h"
 #include "mini_json.h"
 #include "overlay_layout.h"
 
@@ -219,13 +222,280 @@ napi_value StartBurn(napi_env env, napi_callback_info info)
     return promise;
 }
 
-} // namespace
+
+// ---------------- 实时录制管线（阶段1） ----------------
+static osc::RecordStream g_recordStream;
+
+static napi_value NapiPrepareRecord(napi_env env, napi_callback_info info)
+{
+    size_t argc = 5;
+    napi_value args[5] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc < 5) {
+        napi_throw_error(env, nullptr, "prepareRecord 需要 5 个参数");
+        return nullptr;
+    }
+    int32_t w = 0, h = 0, fps = 30, bitrate = 20000000, rotation = 90;
+    napi_get_value_int32(env, args[0], &w);
+    napi_get_value_int32(env, args[1], &h);
+    napi_get_value_int32(env, args[2], &fps);
+    napi_get_value_int32(env, args[3], &bitrate);
+    napi_get_value_int32(env, args[4], &rotation);
+    uint64_t surfaceId = 0;
+    int code = g_recordStream.Prepare(w, h, fps, bitrate, rotation, surfaceId);
+    if (code != 0) {
+        napi_throw_error(env, nullptr, "prepareRecord 失败");
+        return nullptr;
+    }
+    napi_value result = nullptr;
+    napi_create_string_utf8(env, std::to_string(surfaceId).c_str(), NAPI_AUTO_LENGTH, &result);
+    return result;
+}
+
+static napi_value NapiBeginRecord(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc < 1) {
+        napi_throw_error(env, nullptr, "beginRecord 需要 1 个参数");
+        return nullptr;
+    }
+    char buf[4096] = {0};
+    size_t len = 0;
+    napi_get_value_string_utf8(env, args[0], buf, sizeof(buf), &len);
+    int code = g_recordStream.Begin(std::string(buf));
+    napi_value result = nullptr;
+    napi_create_int32(env, code, &result);
+    return result;
+}
+
+// 停止录制：async work —— Execute 工作线程跑 Stop，Complete 回 JS 线程解决 Promise
+struct StopRecordCtx {
+    napi_deferred deferred = nullptr;
+    napi_async_work work = nullptr;
+    osc::RecordStats stats;
+};
+
+static void StopRecordExecute(napi_env env, void *data)
+{
+    (void)env;
+    auto *ctx = static_cast<StopRecordCtx *>(data);
+    ctx->stats = g_recordStream.Stop();
+}
+
+static void StopRecordComplete(napi_env env, napi_status status, void *data)
+{
+    (void)status;
+    auto *ctx = static_cast<StopRecordCtx *>(data);
+    napi_value result = nullptr;
+    napi_create_object(env, &result);
+    napi_value dur = nullptr;
+    napi_create_int64(env, ctx->stats.durationMs, &dur);
+    napi_set_named_property(env, result, "durationMs", dur);
+    napi_value frames = nullptr;
+    napi_create_int64(env, static_cast<int64_t>(ctx->stats.frames), &frames);
+    napi_set_named_property(env, result, "frames", frames);
+    napi_resolve_deferred(env, ctx->deferred, result);
+    napi_delete_async_work(env, ctx->work);
+    delete ctx;
+}
+
+static napi_value NapiStopRecord(napi_env env, napi_callback_info info)
+{
+    (void)info;
+    auto *ctx = new StopRecordCtx();
+    napi_value promise = nullptr;
+    napi_create_promise(env, &ctx->deferred, &promise);
+    napi_value resourceName = nullptr;
+    napi_create_string_utf8(env, "oscStopRecord", NAPI_AUTO_LENGTH, &resourceName);
+    napi_create_async_work(env, nullptr, resourceName, StopRecordExecute, StopRecordComplete,
+        ctx, &ctx->work);
+    napi_queue_async_work(env, ctx->work);
+    return promise;
+}
+
+static napi_value NapiReleaseRecord(napi_env env, napi_callback_info info)
+{
+    (void)env;
+    (void)info;
+    g_recordStream.Release();
+    return nullptr;
+}
+
+
+static napi_value NapiSetWatermarkAssets(napi_env env, napi_callback_info info)
+{
+    size_t argc = 2;
+    napi_value args[2] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc < 2) {
+        napi_throw_error(env, nullptr, "setWatermarkAssets 需要 2 个参数");
+        return nullptr;
+    }
+    char buf[8192] = {0};
+    size_t len = 0;
+    napi_get_value_string_utf8(env, args[0], buf, sizeof(buf), &len);
+    std::vector<const uint8_t *> buffers;
+    bool isArray = false;
+    napi_is_array(env, args[1], &isArray);
+    if (isArray) {
+        uint32_t count = 0;
+        napi_get_array_length(env, args[1], &count);
+        for (uint32_t i = 0; i < count; i++) {
+            napi_value elem = nullptr;
+            napi_get_element(env, args[1], i, &elem);
+            void *data = nullptr;
+            size_t byteLen = 0;
+            bool ok = false;
+            napi_is_arraybuffer(env, elem, &ok);
+            if (ok && napi_get_arraybuffer_info(env, elem, &data, &byteLen) == napi_ok && data != nullptr) {
+                buffers.push_back(static_cast<const uint8_t *>(data));
+            } else {
+                buffers.push_back(nullptr);
+            }
+        }
+    }
+    int code = g_recordStream.SetWatermarkAssets(std::string(buf), buffers);
+    napi_value result = nullptr;
+    napi_create_int32(env, code, &result);
+    return result;
+}
+
+static napi_value NapiUpdateWatermarkLaps(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc < 1) {
+        napi_throw_error(env, nullptr, "updateWatermarkLaps 需要 1 个参数");
+        return nullptr;
+    }
+    char buf[8192] = {0};
+    size_t len = 0;
+    napi_get_value_string_utf8(env, args[0], buf, sizeof(buf), &len);
+    int code = g_recordStream.UpdateLaps(std::string(buf));
+    napi_value result = nullptr;
+    napi_create_int32(env, code, &result);
+    return result;
+}
+
+
+static napi_value NapiStartRtsp(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    int32_t port = 8554;
+    if (argc >= 1) {
+        napi_get_value_int32(env, args[0], &port);
+    }
+    int code = osc::RtspServer::Instance().Start(port);
+    if (code == 0) {
+        // ONVIF 随推流启停：自动发现 + GetStreamUri 直达 RTSP 地址
+        osc::OnvifServer::Instance().Start(8000, port);
+    }
+    napi_value result = nullptr;
+    napi_create_int32(env, code, &result);
+    return result;
+}
+
+static napi_value NapiStopRtsp(napi_env env, napi_callback_info info)
+{
+    (void)env;
+    (void)info;
+    osc::RtspServer::Instance().Stop();
+    osc::OnvifServer::Instance().Stop();
+    return nullptr;
+}
+
+static napi_value NapiRtspStatus(napi_env env, napi_callback_info info)
+{
+    (void)info;
+    napi_value result = nullptr;
+    napi_create_object(env, &result);
+    napi_value running = nullptr;
+    napi_get_boolean(env, osc::RtspServer::Instance().IsRunning(), &running);
+    napi_set_named_property(env, result, "running", running);
+    napi_value hasClient = nullptr;
+    napi_get_boolean(env, osc::RtspServer::Instance().HasClient(), &hasClient);
+    napi_set_named_property(env, result, "hasClient", hasClient);
+    napi_value port = nullptr;
+    napi_create_int32(env, osc::RtspServer::Instance().GetPort(), &port);
+    napi_set_named_property(env, result, "port", port);
+    return result;
+}
+
+
+static napi_value NapiSetCameraFlip(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc < 1) {
+        napi_throw_error(env, nullptr, "setCameraFlip 需要 1 个参数");
+        return nullptr;
+    }
+    bool flip = false;
+    napi_get_value_bool(env, args[0], &flip);
+    g_recordStream.SetFlipX(flip);
+    return nullptr;
+}
+
+
+static napi_value NapiStartRecordingFile(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc < 1) {
+        napi_throw_error(env, nullptr, "startRecordingFile 需要 1 个参数");
+        return nullptr;
+    }
+    char buf[4096] = {0};
+    size_t len = 0;
+    napi_get_value_string_utf8(env, args[0], buf, sizeof(buf), &len);
+    int code = g_recordStream.StartRecording(std::string(buf));
+    napi_value result = nullptr;
+    napi_create_int32(env, code, &result);
+    return result;
+}
+
+static napi_value NapiStopRecordingFile(napi_env env, napi_callback_info info)
+{
+    (void)env;
+    (void)info;
+    osc::RecordStats stats = g_recordStream.StopRecording();
+    napi_value result = nullptr;
+    napi_create_object(env, &result);
+    napi_value dur = nullptr;
+    napi_create_int64(env, stats.durationMs, &dur);
+    napi_set_named_property(env, result, "durationMs", dur);
+    napi_value frames = nullptr;
+    napi_create_int64(env, static_cast<int64_t>(stats.frames), &frames);
+    napi_set_named_property(env, result, "frames", frames);
+    return result;
+}
+
+} // namespace} // namespace
 
 EXTERN_C_START
 static napi_value Init(napi_env env, napi_value exports)
 {
     napi_property_descriptor desc[] = {
         {"startBurn", nullptr, StartBurn, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"prepareRecord", nullptr, NapiPrepareRecord, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"beginRecord", nullptr, NapiBeginRecord, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"stopRecord", nullptr, NapiStopRecord, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"releaseRecord", nullptr, NapiReleaseRecord, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setWatermarkAssets", nullptr, NapiSetWatermarkAssets, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"updateWatermarkLaps", nullptr, NapiUpdateWatermarkLaps, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setCameraFlip", nullptr, NapiSetCameraFlip, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"startRecordingFile", nullptr, NapiStartRecordingFile, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"stopRecordingFile", nullptr, NapiStopRecordingFile, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"startRtsp", nullptr, NapiStartRtsp, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"stopRtsp", nullptr, NapiStopRtsp, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"rtspStatus", nullptr, NapiRtspStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;

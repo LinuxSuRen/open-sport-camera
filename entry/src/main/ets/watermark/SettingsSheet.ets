@@ -35,7 +35,7 @@ export struct SettingsSheet {
         Column() {
           ForEach(this.items, (item: WatermarkItem, idx: number) => {
             this.ItemEditor(item, idx)
-          }, (item: WatermarkItem) => item.id)
+          }, (item: WatermarkItem) => item.id + '_' + item.anchor + '_' + item.enabled + '_' + item.fontScale)
         }
         .width('100%')
         .padding({ bottom: 32 })
@@ -155,30 +155,25 @@ export struct SettingsSheet {
   AnchorRow(item: WatermarkItem, idx: number) {
     Column() {
       Text('位置').fontSize(15).fontColor('#CCCCCC')
-      Grid() {
+      Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Center }) {
         ForEach(WATERMARK_ANCHOR_NAMES, (name: string, ai: number) => {
-          GridItem() {
-            Text(name)
-              .fontSize(13)
-              .fontColor(item.anchor === ai ? '#FFFFFF' : '#999999')
-              .backgroundColor(item.anchor === ai ? '#FF5E14' : '#2A2A2A')
-              .borderRadius(14)
-              .padding({ left: 14, right: 14, top: 6, bottom: 6 })
-              .onClick(() => {
-                this.updateItem(idx, (it: WatermarkItem): WatermarkItem => {
-                  const n = this.clone(it);
-                  n.anchor = ai;
-                  return n;
-                });
-              })
-          }
+          Text(name)
+            .fontSize(13)
+            .fontColor(item.anchor === ai ? '#FFFFFF' : '#999999')
+            .backgroundColor(item.anchor === ai ? '#FF5E14' : '#2A2A2A')
+            .borderRadius(14)
+            .padding({ left: 14, right: 14, top: 6, bottom: 6 })
+            .margin(4)
+            .onClick(() => {
+              this.updateItem(idx, (it: WatermarkItem): WatermarkItem => {
+                const n = this.clone(it);
+                n.anchor = ai;
+                return n;
+              });
+            })
         }, (name: string) => name)
       }
-      .columnsTemplate('1fr 1fr 1fr')
-      .columnsGap(10)
-      .rowsGap(10)
       .width('100%')
-      .height(76)
     }
     .alignItems(HorizontalAlign.Start)
     .width('100%')

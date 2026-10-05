@@ -1,5 +1,8 @@
 import { CameraService } from '../camera/CameraService';
 import { RecorderService, RecordSize } from '../record/RecorderService';
+import { StreamRecorderService } from '../record/StreamRecorderService';
+import { RtspService } from '../record/RtspService';
+import { LensInfo } from '../camera/CameraService';
 import { SwimTimer, TimerState, formatTimer, formatLapLine, LapRecord } from '../timer/SwimTimer';
 import { WatermarkOverlay } from '../watermark/WatermarkOverlay';
 import { WatermarkStore } from '../watermark/WatermarkStore';
@@ -18,7 +21,47 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 const TAG: string = 'Index';
 const DOMAIN: number = 0x0001;
 
-type BurnPhase = 'idle' | 'raster' | 'burning' | 'saving' | 'done' | 'error';
+interface GlyphMetaObj {
+  char: string;
+  width: number;
+  height: number;
+  bufferIndex: number;
+}
+
+interface StaticMetaObj {
+  anchor: number;
+  marginXPx: number;
+  marginYPx: number;
+  width: number;
+  height: number;
+  displayHeightPx: number;
+  opacity: number;
+  bufferIndex: number;
+}
+
+interface WmTimerObj {
+  enabled: boolean;
+  anchor: number;
+  marginXPx: number;
+  marginYPx: number;
+  glyphHeightPx: number;
+  chars: string;
+  lapLabelIndex: number;
+  showLap: boolean;
+  startOffsetMs: number;
+  laps: object[];
+}
+
+interface WmCfgObj {
+  videoWidth: number;
+  videoHeight: number;
+  rotation: number;
+  timer: WmTimerObj;
+  glyphs: GlyphMetaObj[];
+  statics: StaticMetaObj[];
+}
+
+type BurnPhase = 'idle' | 'raster' | 'wmRaster' | 'burning' | 'saving' | 'done' | 'error';
 
 @Entry
 @Component
@@ -45,6 +88,11 @@ struct Index {
   @State eisEnabled: boolean = false;
   @State profileText: string = '';
   @State frontCamera: boolean = false;
+  @State lensList: LensInfo[] = [];
+  @State currentLensId: string = '';
+  /** 实验室开关：实时管线（阶段1：无水印直录；阶段2 起水印入流） */
+  @State useStreamPipeline: boolean = true;
+  @State rtspEnabled: boolean = false;
   @State banner: string = '';
   @State burnPhase: BurnPhase = 'idle';
   @State burnPct: number = 0;
@@ -66,6 +114,7 @@ struct Index {
     if (this.tickId >= 0) {
       clearInterval(this.tickId);
     }
+    StreamRecorderService.release();
     this.cameraService.releaseSession();
     this.recorder.release();
   }
@@ -74,7 +123,7 @@ struct Index {
     Stack({ alignContent: Alignment.TopStart }) {
       // 字形农场置于底层：自然布局保证 componentSnapshot 可用，
       // 烧录期间被全屏遮罩完全遮挡
-      if (this.burnPhase === 'raster') {
+      if (this.burnPhase === 'raster' || this.burnPhase === 'wmRaster') {
         GlyphFarm({
           chars: ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ':', '.', ' '],
           fontPx: this.timerGlyphPx(),
@@ -116,6 +165,10 @@ struct Index {
           this.previewHeightVp = Number(n.height);
         })
 
+        if (this.lensList.length > 1) {
+          this.LensBar()
+        }
+
         this.BottomBar()
       }
       .width('100%')
@@ -137,6 +190,9 @@ struct Index {
       }
 
       if (this.burnPhase === 'burning') {
+        this.BurnBadge()
+      }
+      if (this.burnPhase === 'wmRaster') {
         this.BurnBadge()
       }
       if (this.burnPhase === 'saving') {
@@ -184,6 +240,15 @@ struct Index {
           .padding({ left: 10, right: 10, top: 4, bottom: 4 })
         }
         Blank()
+        if (this.rtspEnabled) {
+          Text('RTSP')
+            .fontSize(12)
+            .fontColor('#FFD200')
+            .border({ width: 1, color: '#66FFD200' })
+            .borderRadius(8)
+            .padding({ left: 6, right: 6, top: 2, bottom: 2 })
+            .margin({ right: 6 })
+        }
         if (this.eisEnabled) {
           Text('防抖')
             .fontSize(12)
@@ -205,6 +270,26 @@ struct Index {
     .width('100%')
     .padding({ top: 48 })
     .hitTestBehavior(HitTestMode.None)
+  }
+
+  @Builder
+  LensBar() {
+    Row({ space: 10 }) {
+      ForEach(this.lensList, (lens: LensInfo) => {
+        Text(lens.label)
+          .fontSize(13)
+          .fontColor(lens.cameraId === this.currentLensId ? '#FFFFFF' : '#BBBBBB')
+          .backgroundColor(lens.cameraId === this.currentLensId ? '#FF5E14' : '#66000000')
+          .borderRadius(14)
+          .padding({ left: 14, right: 14, top: 6, bottom: 6 })
+          .onClick(() => {
+            this.pickLens(lens.cameraId);
+          })
+      }, (lens: LensInfo) => lens.cameraId)
+    }
+    .width('100%')
+    .justifyContent(FlexAlign.Center)
+    .padding({ bottom: 8 })
   }
 
   @Builder
@@ -262,6 +347,30 @@ struct Index {
       .onClick(() => {
         this.swimTimer.reset();
         this.refreshTimerTexts();
+      })
+
+      Blank()
+
+      // RTSP 推流开关
+      Column() {
+        Text('📡').fontSize(22).fontColor(this.rtspEnabled ? '#FFD200' : '#FFFFFF')
+        Text('推流').fontSize(11).fontColor('#CCCCCC').margin({ top: 4 })
+      }
+      .onClick(() => {
+        if (this.rtspEnabled) {
+          RtspService.stop();
+          StreamRecorderService.endStream();
+          this.rtspEnabled = false;
+          this.showBanner('RTSP 推流已停止');
+        } else {
+          if (RtspService.start(8554)) {
+            this.rtspEnabled = true;
+            StreamRecorderService.beginStream();
+            this.showBanner('推流已开启：ONVIF 可自动发现，地址 rtsp://本机IP:8554/live');
+          } else {
+            this.showBanner('推流启动失败（端口被占用？）');
+          }
+        }
       })
 
       Blank()
@@ -329,9 +438,20 @@ struct Index {
         SaveButton({ text: SaveDescription.SAVE_TO_GALLERY, icon: SaveIconStyle.FULL_FILLED,
           buttonType: ButtonType.Capsule })
           .onClick(async () => {
+            if (this.burnPhase === 'saving') {
+              return; // 防重复点击
+            }
             try {
+              // 文件存在性检查
+              if (!this.fileExists(this.burnedPath)) {
+                this.burnMsg = '录制文件不存在，请重新录制';
+                this.burnPhase = 'done';
+                return;
+              }
               this.burnPhase = 'saving';
               await GalleryService.saveVideo(this.context, this.burnedPath);
+              // 延迟清理：等文件系统 flush
+              await this.sleep(500);
               this.cleanupFile(this.burnedSrcPath);
               this.cleanupFile(this.burnedPath);
               this.gallerySaved = true;
@@ -380,14 +500,28 @@ struct Index {
     }
   }
 
+  private openCameraCount: number = 0;
+
   private async openCamera(surfaceId: string): Promise<void> {
+    this.openCameraCount++;
+    hilog.info(DOMAIN, TAG, 'openCamera call #%{public}d', this.openCameraCount);
     try {
       await this.permsReady;
+      let videoSurfaceId: string | undefined = undefined;
+      if (this.useStreamPipeline) {
+        const info0 = this.cameraService.getVideoProfileInfo();
+        const rotation = this.frontCamera ? 270 : 90;
+        videoSurfaceId = StreamRecorderService.prepare(
+          info0.width, info0.height, info0.frameRate, 20000000, 0);
+        hilog.info(DOMAIN, TAG, 'stream pipeline prepared, surface=%{public}s', videoSurfaceId);
+      }
       await this.cameraService.open(this.context, surfaceId,
-        camera.CameraPosition.CAMERA_POSITION_BACK);
+        camera.CameraPosition.CAMERA_POSITION_BACK, undefined, videoSurfaceId);
       const info = this.cameraService.getVideoProfileInfo();
       this.eisEnabled = info.stabilizationMode > 0;
       this.profileText = info.width + 'x' + info.height + '@' + info.frameRate;
+      this.lensList = this.cameraService.getLensList();
+      this.currentLensId = this.cameraService.getCurrentCameraId();
       this.cameraReady = true;
     } catch (e) {
       hilog.error(DOMAIN, TAG, 'openCamera failed: %{public}s', JSON.stringify(e));
@@ -395,45 +529,170 @@ struct Index {
     }
   }
 
-  private async switchCamera(): Promise<void> {
-    if (this.recording || !this.cameraReady) {
+  private async pickLens(cameraId: string): Promise<void> {
+    if (cameraId === this.currentLensId) {
       return;
     }
+    try {
+      await this.cameraService.switchLens(cameraId);
+      this.currentLensId = cameraId;
+      this.lensList = this.cameraService.getLensList();
+    } catch (e) {
+      this.showBanner('切换镜头失败');
+    }
+  }
+
+  private async switchCamera(): Promise<void> {
+    if (!this.cameraReady) {
+      return;
+    }
+    // 录制中允许切换：视频流 surface 常挂不受影响，画面会短暂卡顿后恢复
     const next = this.frontCamera
       ? camera.CameraPosition.CAMERA_POSITION_BACK
       : camera.CameraPosition.CAMERA_POSITION_FRONT;
     try {
       await this.cameraService.switchCamera(next);
       this.frontCamera = !this.frontCamera;
+      this.lensList = this.cameraService.getLensList();
+      this.currentLensId = this.cameraService.getCurrentCameraId();
+      StreamRecorderService.setCameraFlip(this.frontCamera);
+      this.showBanner('已切换到' + (this.frontCamera ? '前置' : '后置') + '摄像头');
     } catch (e) {
+      hilog.error(DOMAIN, TAG, 'switchCamera failed: %{public}s', JSON.stringify(e));
       this.showBanner('切换摄像头失败');
     }
   }
 
+
+  /** 阶段2：栅格化水印资产并下发实时管线（复用 GlyphFarm 与烧录同款配置） */
+  private async prepareWatermarkAssets(): Promise<boolean> {
+    try {
+      await this.sleep(400); // 等待 GlyphFarm 布局
+      const farm = this.glyphFarm;
+      if (farm === null) {
+        return false;
+      }
+      const timerCfg = this.timerItem();
+      const textItems = this.enabledTextItems();
+      const glyphs: BurnGlyph[] = [];
+      const staticsRaw: BurnGlyph[] = [];
+      if (timerCfg.enabled) {
+        const captured = await farm.captureGlyphs();
+        for (const g of captured) {
+          glyphs.push(g);
+        }
+      }
+      const sc = await farm.captureStatics();
+      for (const g of sc) {
+        staticsRaw.push(g);
+      }
+
+      const buffers: ArrayBuffer[] = [];
+      const glyphMeta: GlyphMetaObj[] = [];
+      for (const g of glyphs) {
+        buffers.push(g.rgba);
+        const meta: GlyphMetaObj = {
+          char: g.char, width: g.width, height: g.height, bufferIndex: buffers.length - 1,
+        };
+        glyphMeta.push(meta);
+      }
+      const staticsMeta: StaticMetaObj[] = [];
+      for (let i = 0; i < staticsRaw.length && i < textItems.length; i++) {
+        buffers.push(staticsRaw[i].rgba);
+        const item = textItems[i];
+        const meta: StaticMetaObj = {
+          anchor: item.anchor,
+          marginXPx: this.marginXPx(item.margin),
+          marginYPx: this.marginYPx(item.margin),
+          width: staticsRaw[i].width,
+          height: staticsRaw[i].height,
+          displayHeightPx: this.staticFontPxList()[i],
+          opacity: item.opacity,
+          bufferIndex: buffers.length - 1,
+        };
+        staticsMeta.push(meta);
+      }
+
+      const info = this.cameraService.getVideoProfileInfo();
+      const rotation = this.frontCamera ? 270 : 90;
+      const timerObj: WmTimerObj = {
+        enabled: timerCfg.enabled,
+        anchor: timerCfg.anchor,
+        marginXPx: this.marginXPx(timerCfg.margin),
+        marginYPx: this.marginYPx(timerCfg.margin),
+        glyphHeightPx: this.timerGlyphPx(),
+        chars: '0123456789:. ',
+        lapLabelIndex: timerCfg.showLap && glyphs.length > 0 ? glyphs.length - 1 : -1,
+        showLap: timerCfg.showLap,
+        startOffsetMs: 0,
+        laps: this.snapshotLaps() as object[],
+      };
+      const cfg: WmCfgObj = {
+        videoWidth: info.width,
+        videoHeight: info.height,
+        rotation: rotation,
+        timer: timerObj,
+        glyphs: glyphMeta,
+        statics: staticsMeta,
+      };
+      hilog.info(DOMAIN, TAG, 'wm cfg: anchor=%{public}d mx=%{public}d my=%{public}d',
+        timerCfg.anchor, this.marginXPx(timerCfg.margin), this.marginYPx(timerCfg.margin));
+      hilog.info(DOMAIN, TAG, 'watermark assets ready: %{public}d glyphs', glyphs.length);
+      return true;
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'prepareWatermarkAssets failed: %{public}s', JSON.stringify(e));
+      return false;
+    }
+  }
+
   private async startRecording(): Promise<void> {
-    if (!this.cameraReady || this.recording || this.burnPhase === 'burning' || this.burnPhase === 'raster') {
-      if (this.burnPhase === 'burning' || this.burnPhase === 'raster') {
-        this.showBanner('水印还在写入，稍等一下');
+    if (!this.cameraReady || this.recording || this.burnPhase === 'burning' || this.burnPhase === 'raster' || this.burnPhase === 'wmRaster') {
+      if (this.burnPhase === 'burning' || this.burnPhase === 'raster' || this.burnPhase === 'wmRaster') {
+        this.showBanner('水印还在准备，稍等一下');
       }
       return;
     }
     try {
-      const profile = this.cameraService.getVideoProfileInfo();
-      const rotation = this.frontCamera ? 270 : 90;
-      await this.recorder.prepare(this.context, profile, rotation);
-      const surfaceId = await this.recorder.getSurfaceId();
-      this.videoOutput = await this.cameraService.attachVideoSurface(surfaceId);
+      if (this.useStreamPipeline) {
+        const devRot = StreamRecorderService.getDeviceRotation();
+        this.showBanner(devRot === 90 || devRot === 270 ? '横屏录制' : '竖屏录制');
+        // 阶段2：录制前栅格化水印资产（~400ms），随后入流合成
+        this.burnPhase = 'wmRaster';
+        const ok = await this.prepareWatermarkAssets();
+        this.burnPhase = 'idle';
+        if (!ok) {
+          this.showBanner('水印资产准备失败，本次录制不带水印');
+        }
+        const dir = this.context.cacheDir + '/record';
+        const ts = new Date().getTime();
+        const recPath = dir + '/osc_' + ts + '.mp4';
+        if (!StreamRecorderService.attachRecording(recPath)) {
+          // 管线未运行（推流未开），先启动再挂载
+          StreamRecorderService.beginStream();
+          StreamRecorderService.attachRecording(recPath);
+        }
+      } else {
+        const profile = this.cameraService.getVideoProfileInfo();
+        const rotation = this.frontCamera ? 270 : 90;
+        await this.recorder.prepare(this.context, profile, rotation);
+        const surfaceId = await this.recorder.getSurfaceId();
+        this.videoOutput = await this.cameraService.attachVideoSurface(surfaceId);
+      }
 
       // 计时与录制完全同步：每次录制都从 0 起跑
       this.swimTimer.reset();
-      this.swimTimer.start();
-      // 首帧到达时刻记录计时基准，烧录时按 基准+PTS 逐帧还原读数
+      this.swimTimer.start();  // 实时管线水印 startOffsetMs=0（计时与首帧同源）
+      // 首帧到达时刻记录计时基准，烧录时按 基准+PTS 逐帧还原读数（仅旧管线）
       this.recStartTimerOffset = this.swimTimer.elapsedMs();
-      this.videoOutput.on('frameStart', () => {
-        this.recStartTimerOffset = this.swimTimer.elapsedMs();
-      });
+      if (this.videoOutput !== undefined) {
+        this.videoOutput.on('frameStart', () => {
+          this.recStartTimerOffset = this.swimTimer.elapsedMs();
+        });
+      }
 
-      await this.recorder.start();
+      if (!this.useStreamPipeline) {
+        await this.recorder.start();
+      }
       this.recording = true;
       this.startRecDurationTick();
     } catch (e) {
@@ -444,19 +703,35 @@ struct Index {
   }
 
   private async stopRecording(): Promise<void> {
+    hilog.info(DOMAIN, TAG, 'stopRecording entry');
     if (!this.recording) {
       return;
     }
     try {
+      this.recording = false;
+      this.stopRecDurationTick();
+      // 录制结束计时同步结束（冻结显示最终成绩）
+      this.swimTimer.pause();
+
+      if (this.useStreamPipeline) {
+        // 实时管线：视频已带封装完成，直接进入保存（阶段2 起水印在流内）
+        const stats = StreamRecorderService.detachRecording();
+        const path = StreamRecorderService.getFilePath();
+        hilog.info(DOMAIN, TAG, 'stream stop: dur=%{public}lldms frames=%{public}lld',
+          stats.durationMs, stats.frames);
+        this.burnedSrcPath = path;
+        this.burnedPath = path;
+        this.gallerySaved = false;
+        this.burnPhase = 'done';
+        this.burnMsg = '录制完成（' + Math.round(stats.durationMs / 1000) + ' 秒），点击保存到相册';
+        return;
+      }
+
       const srcPath = await this.recorder.stop();
       const lapsSnapshot = this.snapshotLaps();
       const offsetSnapshot = this.recStartTimerOffset;
       const recSize = this.recorder.getRecordingSize();
       const rotation = this.frontCamera ? 270 : 90;
-      this.recording = false;
-      this.stopRecDurationTick();
-      // 录制结束计时同步结束（冻结显示最终成绩）
-      this.swimTimer.pause();
       await this.cameraService.detachVideoOutput(this.videoOutput!);
       this.videoOutput = undefined;
       await this.recorder.release();
@@ -472,6 +747,12 @@ struct Index {
   }
 
   private async cleanupRecording(): Promise<void> {
+    if (this.useStreamPipeline) {
+      if (StreamRecorderService.isRecording()) {
+        await StreamRecorderService.stop();
+      }
+      return;
+    }
     if (this.videoOutput) {
       await this.cameraService.detachVideoOutput(this.videoOutput);
       this.videoOutput = undefined;
@@ -480,6 +761,7 @@ struct Index {
   }
 
   private doLap(): void {
+    hilog.info(DOMAIN, TAG, 'doLap entry');
     if (!this.recording) {
       this.showBanner('录制中才能计圈');
       return;
@@ -487,6 +769,9 @@ struct Index {
     const lap = this.swimTimer.lap();
     if (lap !== null) {
       this.refreshTimerTexts();
+      if (this.useStreamPipeline) {
+        StreamRecorderService.updateLaps(JSON.stringify(this.snapshotLaps()));
+      }
     }
   }
 
@@ -713,6 +998,15 @@ struct Index {
         this.banner = '';
       }
     }, 2600);
+  }
+
+
+  private fileExists(path: string): boolean {
+    try {
+      return path.length > 0 && fileIo.accessSync(path);
+    } catch (e) {
+      return false;
+    }
   }
 
   private cleanupFile(path: string): void {
