@@ -136,7 +136,10 @@ struct Index {
           })
       }
 
-      if (this.burnPhase === 'raster' || this.burnPhase === 'burning' || this.burnPhase === 'saving') {
+      if (this.burnPhase === 'burning') {
+        this.BurnBadge()
+      }
+      if (this.burnPhase === 'saving') {
         this.BurnMask()
       }
 
@@ -251,22 +254,14 @@ struct Index {
         }
       })
 
-      // 计时器启停
+      // 计时重置（计时随录制自动开始/结束）
       Column() {
-        Text(this.swimTimer.getState() === TimerState.RUNNING ? '⏸' : '▶')
-          .fontSize(22)
-          .fontColor(this.swimTimer.getState() === TimerState.IDLE ? '#666666' : '#FFFFFF')
-        Text('计时').fontSize(11).fontColor('#CCCCCC').margin({ top: 4 })
+        Text('↺').fontSize(22).fontColor('#FFFFFF')
+        Text('重置').fontSize(11).fontColor('#CCCCCC').margin({ top: 4 })
       }
       .onClick(() => {
-        if (this.swimTimer.getState() === TimerState.RUNNING) {
-          this.swimTimer.pause();
-        } else if (this.swimTimer.getState() === TimerState.PAUSED) {
-          this.swimTimer.start();
-        } else {
-          this.showBanner('录制开始时会自动计时，也可点这里先开始');
-          this.swimTimer.start();
-        }
+        this.swimTimer.reset();
+        this.refreshTimerTexts();
       })
 
       Blank()
@@ -283,6 +278,22 @@ struct Index {
     .width('100%')
     .padding({ left: 28, right: 28, top: 12, bottom: 34 })
     .alignItems(VerticalAlign.Center)
+  }
+
+  @Builder
+  BurnBadge() {
+    Row({ space: 8 }) {
+      LoadingProgress().width(18).height(18).color('#FF5E14')
+      Text('水印写入中 ' + this.burnPct + '%')
+        .fontSize(13)
+        .fontColor('#FFFFFF')
+    }
+    .backgroundColor('#99000000')
+    .borderRadius(16)
+    .padding({ left: 14, right: 14, top: 6, bottom: 6 })
+    .position({ x: '50%', y: 120 })
+    .translate({ x: '-50%' })
+    .hitTestBehavior(HitTestMode.None)
   }
 
   @Builder
@@ -400,7 +411,10 @@ struct Index {
   }
 
   private async startRecording(): Promise<void> {
-    if (!this.cameraReady || this.recording || this.burnPhase === 'burning') {
+    if (!this.cameraReady || this.recording || this.burnPhase === 'burning' || this.burnPhase === 'raster') {
+      if (this.burnPhase === 'burning' || this.burnPhase === 'raster') {
+        this.showBanner('水印还在写入，稍等一下');
+      }
       return;
     }
     try {
@@ -410,12 +424,9 @@ struct Index {
       const surfaceId = await this.recorder.getSurfaceId();
       this.videoOutput = await this.cameraService.attachVideoSurface(surfaceId);
 
-      // 计时与录制联动：录制启动时秒表自动起步（已有读数则续计）
-      if (this.swimTimer.getState() === TimerState.IDLE) {
-        this.swimTimer.start();
-      } else if (this.swimTimer.getState() === TimerState.PAUSED) {
-        this.swimTimer.start();
-      }
+      // 计时与录制完全同步：每次录制都从 0 起跑
+      this.swimTimer.reset();
+      this.swimTimer.start();
       // 首帧到达时刻记录计时基准，烧录时按 基准+PTS 逐帧还原读数
       this.recStartTimerOffset = this.swimTimer.elapsedMs();
       this.videoOutput.on('frameStart', () => {
@@ -444,12 +455,14 @@ struct Index {
       const rotation = this.frontCamera ? 270 : 90;
       this.recording = false;
       this.stopRecDurationTick();
-
+      // 录制结束计时同步结束（冻结显示最终成绩）
+      this.swimTimer.pause();
       await this.cameraService.detachVideoOutput(this.videoOutput!);
       this.videoOutput = undefined;
       await this.recorder.release();
 
-      await this.runBurnPipeline(srcPath, recSize, rotation, offsetSnapshot, lapsSnapshot);
+      // 烧录转后台：立即恢复拍摄，完成后弹保存面板
+      this.runBurnPipeline(srcPath, recSize, rotation, offsetSnapshot, lapsSnapshot);
     } catch (e) {
       this.recording = false;
       this.stopRecDurationTick();

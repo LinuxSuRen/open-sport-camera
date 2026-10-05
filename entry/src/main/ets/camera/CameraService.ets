@@ -69,8 +69,15 @@ export class CameraService {
     this.session.addOutput(this.previewOutput);
     await this.session.commitConfig();
     await this.session.start();
-    // EIS 延后到录制挂流事务（见 attachVideoSurface）
+    // EIS 探测：在已提交的空闲态调用（无活事务，失败不损伤流状态）。
+    // 真机教训：活事务内任何失败调用都会给流留下半损坏状态（预览冻结）。
     this.chosenStabMode = 0;
+    try {
+      this.session.setVideoStabilizationMode(camera.VideoStabilizationMode.AUTO);
+      this.chosenStabMode = camera.VideoStabilizationMode.AUTO as number;
+    } catch (e) {
+      hilog.info(DOMAIN, TAG, 'EIS not available on this device (outside-transaction probe)');
+    }
     hilog.info(DOMAIN, TAG,
       'camera session started, preview=%{public}dx%{public}d stab=%{public}d',
       this.chosenPreviewProfile.size.width, this.chosenPreviewProfile.size.height, this.chosenStabMode);
@@ -121,29 +128,12 @@ export class CameraService {
       throw new Error('相机未就绪');
     }
     const videoOutput = this.manager.createVideoOutput(this.chosenVideoProfile, recorderSurfaceId);
+    // 挂流事务保持纯净：仅 addOutput。任何失败调用（如设备不支持的 EIS）都会损坏流。
     this.session.beginConfig();
     this.session.addOutput(videoOutput);
-    // EIS 属于视频流能力：挂载 VideoOutput 的事务内设置（预览-only 会话下设置会被拒绝）。
-    // AUTO→HIGH→MIDDLE 逐级降级；部分机型固件缺 EIS 标定（如 SGT-AL50）会全部失败，
-    // 此时录制正常但不启用防抖。
-    const stabTryList: camera.VideoStabilizationMode[] = [
-      camera.VideoStabilizationMode.AUTO,
-      camera.VideoStabilizationMode.HIGH,
-      camera.VideoStabilizationMode.MIDDLE,
-    ];
-    this.chosenStabMode = 0;
-    for (const mode of stabTryList) {
-      try {
-        this.session.setVideoStabilizationMode(mode);
-        this.chosenStabMode = mode as number;
-        break;
-      } catch (e) {
-        const err = e as BusinessError;
-        hilog.warn(DOMAIN, TAG, 'set stab %{public}d with video stream failed: %{public}s',
-          mode as number, JSON.stringify(err));
-      }
-    }
     await this.session.commitConfig();
+    // 动态加流后必须重启会话，否则预览流停在旧协商上（真机实测画面冻结）
+    await this.session.start();
     await videoOutput.start();
     return videoOutput;
   }

@@ -53,6 +53,100 @@ void BurnEngine::ReportProgress(const ProgressFn &cb, int pct)
     }
 }
 
+
+// ---------- AVC CSD 收集（NAL 解析） ----------
+// 从编码输出中提取 SPS(7)/PPS(8)，支持 annex-B 起始码与 AVCC 长度前缀两种封装
+static void CollectAvcCsd(const uint8_t *buf, size_t size, std::vector<uint8_t> &spsNal,
+    std::vector<uint8_t> &ppsNal)
+{
+    auto hasStart = [&]() {
+        for (size_t i = 0; i + 3 < size; i++) {
+            if (buf[i] == 0 && buf[i + 1] == 0 && buf[i + 2] == 1) {
+                return true;
+            }
+        }
+        return false;
+    };
+    auto tryNal = [&](const uint8_t *nal, size_t n) {
+        if (n < 2) {
+            return;
+        }
+        int t = nal[0] & 0x1F;
+        if (t == 7 && spsNal.empty()) {
+            spsNal.assign(nal, nal + n);
+        } else if (t == 8 && ppsNal.empty()) {
+            ppsNal.assign(nal, nal + n);
+        }
+    };
+    if (hasStart()) {
+        size_t i = 0;
+        while (i + 4 < size) {
+            size_t scLen = 0;
+            if (buf[i] == 0 && buf[i + 1] == 0 && buf[i + 2] == 1) {
+                scLen = 3;
+            } else if (buf[i] == 0 && buf[i + 1] == 0 && buf[i + 2] == 0 && buf[i + 3] == 1) {
+                scLen = 4;
+            }
+            if (scLen == 0) {
+                i++;
+                continue;
+            }
+            size_t nalStart = i + scLen;
+            if (nalStart >= size) {
+                break;
+            }
+            size_t j = nalStart + 1;
+            while (j + 3 < size) {
+                if (buf[j] == 0 && buf[j + 1] == 0 && buf[j + 2] == 1) {
+                    break;
+                }
+                if (buf[j] == 0 && buf[j + 1] == 0 && buf[j + 2] == 0 && buf[j + 3] == 1) {
+                    break;
+                }
+                j++;
+            }
+            size_t nalEnd = (j + 3 >= size) ? size : j;
+            tryNal(buf + nalStart, nalEnd - nalStart);
+            i = nalEnd;
+        }
+        return;
+    }
+    // AVCC 长度前缀
+    size_t i = 0;
+    while (i + 4 < size) {
+        uint32_t len = (static_cast<uint32_t>(buf[i]) << 24) | (static_cast<uint32_t>(buf[i + 1]) << 16) |
+            (static_cast<uint32_t>(buf[i + 2]) << 8) | static_cast<uint32_t>(buf[i + 3]);
+        if (len == 0 || i + 4 + len > size) {
+            break;
+        }
+        tryNal(buf + i + 4, len);
+        i += 4 + len;
+    }
+}
+
+// 组装 avcC 记录（ISO 14496-15）：muxer 的 CODEC_CONFIG 期望格式
+static std::vector<uint8_t> BuildAvcCsd(const std::vector<uint8_t> &spsNal, const std::vector<uint8_t> &ppsNal)
+{
+    std::vector<uint8_t> out;
+    if (spsNal.size() < 4 || ppsNal.empty()) {
+        return out;
+    }
+    out.push_back(0x01);              // configurationVersion
+    out.push_back(spsNal[1]);         // profile_idc
+    out.push_back(spsNal[2]);         // constraint flags
+    out.push_back(spsNal[3]);         // level_idc
+    out.push_back(0xFF);              // reserved + lengthSizeMinusOne=3
+    out.push_back(0xE1);              // reserved + numOfSPS=1
+    out.push_back(static_cast<uint8_t>((spsNal.size() >> 8) & 0xFF));
+    out.push_back(static_cast<uint8_t>(spsNal.size() & 0xFF));
+    out.insert(out.end(), spsNal.begin(), spsNal.end());
+    out.push_back(0x01);              // numOfPPS
+    out.push_back(static_cast<uint8_t>((ppsNal.size() >> 8) & 0xFF));
+    out.push_back(static_cast<uint8_t>(ppsNal.size() & 0xFF));
+    out.insert(out.end(), ppsNal.begin(), ppsNal.end());
+    return out;
+}
+
 int BurnEngine::Run(const std::string &srcPath, const std::string &dstPath,
     const BurnCfg &cfg, const ProgressFn &onProgress)
 {
@@ -247,8 +341,10 @@ int BurnEngine::Run(const std::string &srcPath, const std::string &dstPath,
         bool muxerStarted = false;
         int32_t muxVideoTrack = -1;
         int32_t muxAudioTrack = -1;
-        std::vector<uint8_t> csd; // 编码器输出的 codec specific data
-        bool csdDone = false;
+        std::vector<uint8_t> spsNal; // 裸 SPS NAL（无起始码）
+        std::vector<uint8_t> ppsNal; // 裸 PPS NAL
+        bool spsSeen = false;
+        bool ppsSeen = false;
         bool demuxEos = false;
         bool decEos = false;
         bool encEosNotified = false;
@@ -258,11 +354,14 @@ int BurnEngine::Run(const std::string &srcPath, const std::string &dstPath,
         uint64_t encOutputs = 0;
 
         // ---------- 主循环 ----------
+        bool progressed = false;
         while (!(demuxEos && decEos && encEosNotified && encEosSeen)) {
+            progressed = false;
             // 1) 喂解码器
             if (!demuxEos) {
                 uint32_t inIdx = 0;
                 if (OH_VideoDecoder_QueryInputBuffer(decoder, &inIdx, 0) == AV_ERR_OK) {
+                    progressed = true;
                     OH_AVBuffer *decIn = OH_VideoDecoder_GetInputBuffer(decoder, inIdx);
                     if (decIn != nullptr) {
                         OH_AVErrCode r = OH_AVDemuxer_ReadSampleBuffer(demuxer,
@@ -296,6 +395,7 @@ int BurnEngine::Run(const std::string &srcPath, const std::string &dstPath,
             if (!decEos) {
                 uint32_t outIdx = 0;
                 if (OH_VideoDecoder_QueryOutputBuffer(decoder, &outIdx, 0) == AV_ERR_OK) {
+                    progressed = true;
                     OH_AVBuffer *decOut = OH_VideoDecoder_GetOutputBuffer(decoder, outIdx);
                     if (decOut != nullptr) {
                         OH_AVCodecBufferAttr attr = {};
@@ -386,6 +486,7 @@ int BurnEngine::Run(const std::string &srcPath, const std::string &dstPath,
             if (!encEosSeen) {
                 uint32_t encOutIdx = 0;
                 if (OH_VideoEncoder_QueryOutputBuffer(encoder, &encOutIdx, 0) == AV_ERR_OK) {
+                    progressed = true;
                     OH_AVBuffer *encOut = OH_VideoEncoder_GetOutputBuffer(encoder, encOutIdx);
                     if (encOut != nullptr) {
                         OH_AVCodecBufferAttr attr = {};
@@ -395,21 +496,49 @@ int BurnEngine::Run(const std::string &srcPath, const std::string &dstPath,
                             encEosSeen = true;
                         } else if (OH_AVBuffer_GetAddr(encOut) != nullptr && attr.size > 0) {
                             const uint8_t *d = OH_AVBuffer_GetAddr(encOut);
-                            if ((attr.flags & AVCODEC_BUFFER_FLAGS_CODEC_DATA) != 0) {
-                                csd.insert(csd.end(), d, d + attr.size);
-                            } else if (!csdDone && csd.empty() &&
-                                (attr.flags & AVCODEC_BUFFER_FLAGS_SYNC_FRAME) != 0) {
-                                // 编码器未单独输出 CSD 时，首关键帧作 CSD（并照常写入样本）
-                                csd.insert(csd.end(), d, d + attr.size);
-                                csdDone = true;
+                            // 从任何输出中提取 SPS/PPS（CSD 缓冲或内联在关键帧里）。
+                            // 教训：SPS 与 PPS 可能分缓冲输出，只等首个 CSD 会缺 PPS，
+                            // 导致产物流无参数集、播放全绿。
+                            if (!spsSeen || !ppsSeen) {
+                                CollectAvcCsd(d, attr.size, spsNal, ppsNal);
+                                if (!spsNal.empty()) {
+                                    spsSeen = true;
+                                }
+                                if (!ppsNal.empty()) {
+                                    ppsSeen = true;
+                                }
                             }
-                            if (!muxerStarted && (csdDone || !csd.empty())) {
-                                if (!csdDone && !csd.empty()) {
-                                    csdDone = true;
+                            const bool isCodecData = (attr.flags & AVCODEC_BUFFER_FLAGS_CODEC_DATA) != 0;
+                            if (!muxerStarted && spsSeen && ppsSeen && !isCodecData) {
+                                // CODEC_CONFIG 用 avcC 记录格式（ISO 14496-15）：
+                                // muxer 对 annex-B 起始码输入会解析出损坏的 avcC（实测）
+                                uint8_t *descCsd = nullptr;
+                                size_t descCsdSize = 0;
+                                std::vector<uint8_t> csd;
+                                {
+                                    OH_AVFormat *outDesc = OH_VideoEncoder_GetOutputDescription(encoder);
+                                    if (outDesc != nullptr) {
+                                        OH_AVFormat_GetBuffer(outDesc, OH_MD_KEY_CODEC_CONFIG, &descCsd, &descCsdSize);
+                                    }
+                                    if (descCsd != nullptr && descCsdSize > 8) {
+                                        csd.assign(descCsd, descCsd + descCsdSize);
+                                        MEDIA_LOG_INFO("muxer csd from encoder description: %{public}d bytes",
+                                            static_cast<int>(descCsdSize));
+                                    }
+                                    if (outDesc != nullptr) {
+                                        OH_AVFormat_Destroy(outDesc);
+                                    }
+                                }
+                                if (csd.empty()) {
+                                    csd = BuildAvcCsd(spsNal, ppsNal);
+                                    MEDIA_LOG_INFO("muxer csd avcC built: %{public}d bytes (sps=%{public}d pps=%{public}d)",
+                                        static_cast<int>(csd.size()), spsSeen ? 1 : 0, ppsSeen ? 1 : 0);
                                 }
                                 OH_AVFormat *vfmt = OH_AVFormat_CreateVideoFormat("video/avc", videoW, videoH);
                                 OH_AVFormat_SetIntValue(vfmt, OH_MD_KEY_FRAME_RATE, 30);
-                                OH_AVFormat_SetBuffer(vfmt, OH_MD_KEY_CODEC_CONFIG, csd.data(), csd.size());
+                                if (!csd.empty()) {
+                                    OH_AVFormat_SetBuffer(vfmt, OH_MD_KEY_CODEC_CONFIG, csd.data(), csd.size());
+                                }
                                 if (OH_AVMuxer_AddTrack(muxer, &muxVideoTrack, vfmt) != AV_ERR_OK) {
                                     OH_AVFormat_Destroy(vfmt);
                                     ret = -30;
@@ -429,7 +558,7 @@ int BurnEngine::Run(const std::string &srcPath, const std::string &dstPath,
                                 OSC_CHECK(OH_AVMuxer_Start(muxer));
                                 muxerStarted = true;
                             }
-                            if (muxerStarted && (attr.flags & AVCODEC_BUFFER_FLAGS_CODEC_DATA) == 0) {
+                            if (muxerStarted && !isCodecData) {
                                 if (OH_AVMuxer_WriteSampleBuffer(muxer,
                                     static_cast<uint32_t>(muxVideoTrack), encOut) != AV_ERR_OK) {
                                     ret = -31;
@@ -442,9 +571,10 @@ int BurnEngine::Run(const std::string &srcPath, const std::string &dstPath,
                 }
             }
 
-            // 让出 CPU（2ms），避免全速忙转
-            struct timespec ts = {0, 2000000};
-            nanosleep(&ts, nullptr);
+            if (!progressed) {
+                struct timespec ts = {0, 1000000};
+                nanosleep(&ts, nullptr);
+            }
         }
         if (ret != 0) {
             break;
