@@ -18,6 +18,7 @@ add_library(burn SHARED
     burn_engine.cpp
     record_stream.cpp
     rtsp_server.cpp
+    onvif_server.cpp
 )
 
 find_library(

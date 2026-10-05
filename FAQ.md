@@ -69,6 +69,21 @@ hvigorw assembleHap --mode module -p product=default -p buildMode=debug --no-dae
 
 本机型实测无论在 Configure 前还是后注册都可能失败；该回调是 surface 模式必需的输入参数回推通道，失败时编码器不消费输入。处理见 [record_stream.cpp](entry/src/main/cpp/record_stream.cpp)。
 
+## 推流与 ONVIF 发现
+
+**Q：如何在电脑上看手机实时画面？**
+
+1. 手机与电脑连同一 Wi-Fi
+2. App 底栏点「推流」（出现 RTSP 徽标）
+3. 点「录制」开始供流（推流内容随录制编码流）
+4. 电脑 VLC 打开 `rtsp://<手机IP>:8554/live`
+
+**Q：不想手输 IP？**
+
+开启推流后手机同时提供 ONVIF 服务（自动发现 + GetStreamUri）：
+- 支持 ONVIF 的 NVR/软件（如 ONVIF Device Manager、蓝鲨等）可自动发现设备「OpenSportCamera」并直接取得 RTSP 地址
+- SOAP 服务端口 8000，WS-Discovery 组播 239.255.255.250:3702
+
 ## 调试工具
 
 ```bash

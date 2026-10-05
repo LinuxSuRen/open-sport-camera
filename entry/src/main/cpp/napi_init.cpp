@@ -15,6 +15,7 @@
 #include "burn_engine.h"
 #include "record_stream.h"
 #include "rtsp_server.h"
+#include "onvif_server.h"
 #include "mini_json.h"
 #include "overlay_layout.h"
 
@@ -390,6 +391,10 @@ static napi_value NapiStartRtsp(napi_env env, napi_callback_info info)
         napi_get_value_int32(env, args[0], &port);
     }
     int code = osc::RtspServer::Instance().Start(port);
+    if (code == 0) {
+        // ONVIF 随推流启停：自动发现 + GetStreamUri 直达 RTSP 地址
+        osc::OnvifServer::Instance().Start(8000, port);
+    }
     napi_value result = nullptr;
     napi_create_int32(env, code, &result);
     return result;
@@ -400,6 +405,7 @@ static napi_value NapiStopRtsp(napi_env env, napi_callback_info info)
     (void)env;
     (void)info;
     osc::RtspServer::Instance().Stop();
+    osc::OnvifServer::Instance().Stop();
     return nullptr;
 }
 
