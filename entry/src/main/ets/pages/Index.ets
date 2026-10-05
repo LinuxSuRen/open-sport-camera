@@ -652,6 +652,8 @@ struct Index {
     }
     try {
       if (this.useStreamPipeline) {
+        const devRot = StreamRecorderService.getDeviceRotation();
+        this.showBanner(devRot === 90 || devRot === 270 ? '横屏录制' : '竖屏录制');
         // 阶段2：录制前栅格化水印资产（~400ms），随后入流合成
         this.burnPhase = 'wmRaster';
         const ok = await this.prepareWatermarkAssets();

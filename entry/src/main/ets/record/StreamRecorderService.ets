@@ -1,4 +1,5 @@
 import burn from 'libburn.so';
+import { display } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 
@@ -14,6 +15,16 @@ export interface StreamRecordStats {
  * 预览冻结与录制花屏。
  */
 export class StreamRecorderService {
+  /** 获取当前设备旋转角度（0=竖屏 90=右横 180=倒竖 270=左横） */
+  static getDeviceRotation(): number {
+    try {
+      const d = display.getDefaultDisplaySync();
+      return d.rotation;
+    } catch (e) {
+      return 0;
+    }
+  }
+
   private static prepared = false;
   private static recording = false;
   private static filePath = '';
