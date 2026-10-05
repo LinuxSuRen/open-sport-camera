@@ -31,6 +31,8 @@ struct Index {
   private glyphFarm: GlyphFarm | null = null;
   private recStartTimerOffset: number = 0;
   private context: common.Context = this.getUIContext().getHostContext() as common.Context;
+  /** 权限申请完成信号：相机打开前必须等待，避免权限弹窗未确认时开流失败 */
+  private permsReady: Promise<void> = Promise.resolve();
 
   @State cameraReady: boolean = false;
   @State recording: boolean = false;
@@ -50,7 +52,7 @@ struct Index {
   @State previewHeightVp: number = 780;
 
   aboutToAppear(): void {
-    this.requestPermissions();
+    this.permsReady = this.requestPermissions();
     this.tickId = setInterval(() => {
       this.refreshTimerTexts();
     }, 33);
@@ -336,6 +338,7 @@ struct Index {
 
   private async openCamera(surfaceId: string): Promise<void> {
     try {
+      await this.permsReady;
       await this.cameraService.open(this.context, surfaceId,
         camera.CameraPosition.CAMERA_POSITION_BACK);
       const info = this.cameraService.getVideoProfileInfo();

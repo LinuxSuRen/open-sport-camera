@@ -31,6 +31,9 @@ jobs:
           unzip -q /tmp/cdt.zip -d /tmp/cdt-out
           mv /tmp/cdt-out/command-line-tools ~/command-line-tools
 
+      - name: 烧录引擎核心单元测试（宿主机）
+        run: bash entry/src/main/cpp/tests/run_host_tests.sh
+
       - name: 安装依赖并构建
         run: |
           export PATH=~/command-line-tools/bin:$PATH
