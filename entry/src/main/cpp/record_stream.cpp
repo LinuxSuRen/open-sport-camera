@@ -79,7 +79,7 @@ void main() {
     vec2 uv = vec2(aPos.x * 0.5 + 0.5, 0.5 - aPos.y * 0.5);
     if (uRotate > 0.5) {
         // 90° 旋转：竖屏输出坐标系下采样横屏纹理
-        uv = vec2(uv.y, 1.0 - uv.x);
+        uv = vec2(1.0 - uv.y, uv.x);
     }
     if (uFlipX > 0.5) {
         uv.x = 1.0 - uv.x;
