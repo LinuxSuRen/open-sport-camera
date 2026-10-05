@@ -70,6 +70,17 @@ export class StreamRecorderService {
     }
   }
 
+  /** 挂载 muxer 开始录文件（管线已在运行，推流不断） */
+  static attachRecording(path: string): boolean {
+    return burn.startRecordingFile(path) === 0;
+  }
+
+  /** 卸载 muxer 停止录文件（管线继续运行） */
+  static detachRecording(): StreamRecordStats {
+    const stats = burn.stopRecordingFile() as StreamRecordStats;
+    return stats;
+  }
+
   static begin(context: common.Context): string {
     if (!StreamRecorderService.prepared) {
       throw new Error('实时管线未就绪');

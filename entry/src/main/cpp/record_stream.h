@@ -40,8 +40,14 @@ public:
   /** 开始录制：启动编码器与渲染循环，输出到 outPath */
   int Begin(const std::string &outPath);
 
-  /** 停止录制并完成 MP4（阻塞至 EOS 落盘；管线保持 Prepared 状态） */
+  /** 停止编码管线（推流和录制都结束时调用） */
   RecordStats Stop();
+
+  /** 挂载 muxer 开始录文件（编码管线须已在运行，推流不受影响） */
+  int StartRecording(const std::string &outPath);
+
+  /** 卸载 muxer 停止录文件（编码管线继续运行，推流不断） */
+  RecordStats StopRecording();
 
   /** 释放全部资源（相机关闭/退出时调用） */
   void Release();

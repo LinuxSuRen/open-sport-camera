@@ -55,3 +55,9 @@ export const rtspStatus: () => RtspStatus;
 
 /** 切换前后摄像头时设置水平镜像（前置=true 后置=false） */
 export const setCameraFlip: (flip: boolean) => void;
+
+/** 挂载 muxer 开始录文件（编码管线须已在运行，推流不断） */
+export const startRecordingFile: (outPath: string) => number;
+
+/** 卸载 muxer 停止录文件（编码管线继续运行） */
+export const stopRecordingFile: () => RecordStats;

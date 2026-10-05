@@ -442,6 +442,41 @@ static napi_value NapiSetCameraFlip(napi_env env, napi_callback_info info)
     return nullptr;
 }
 
+
+static napi_value NapiStartRecordingFile(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc < 1) {
+        napi_throw_error(env, nullptr, "startRecordingFile 需要 1 个参数");
+        return nullptr;
+    }
+    char buf[4096] = {0};
+    size_t len = 0;
+    napi_get_value_string_utf8(env, args[0], buf, sizeof(buf), &len);
+    int code = g_recordStream.StartRecording(std::string(buf));
+    napi_value result = nullptr;
+    napi_create_int32(env, code, &result);
+    return result;
+}
+
+static napi_value NapiStopRecordingFile(napi_env env, napi_callback_info info)
+{
+    (void)env;
+    (void)info;
+    osc::RecordStats stats = g_recordStream.StopRecording();
+    napi_value result = nullptr;
+    napi_create_object(env, &result);
+    napi_value dur = nullptr;
+    napi_create_int64(env, stats.durationMs, &dur);
+    napi_set_named_property(env, result, "durationMs", dur);
+    napi_value frames = nullptr;
+    napi_create_int64(env, static_cast<int64_t>(stats.frames), &frames);
+    napi_set_named_property(env, result, "frames", frames);
+    return result;
+}
+
 } // namespace} // namespace
 
 EXTERN_C_START
@@ -456,6 +491,8 @@ static napi_value Init(napi_env env, napi_value exports)
         {"setWatermarkAssets", nullptr, NapiSetWatermarkAssets, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"updateWatermarkLaps", nullptr, NapiUpdateWatermarkLaps, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setCameraFlip", nullptr, NapiSetCameraFlip, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"startRecordingFile", nullptr, NapiStartRecordingFile, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"stopRecordingFile", nullptr, NapiStopRecordingFile, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"startRtsp", nullptr, NapiStartRtsp, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"stopRtsp", nullptr, NapiStopRtsp, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"rtspStatus", nullptr, NapiRtspStatus, nullptr, nullptr, nullptr, napi_default, nullptr},

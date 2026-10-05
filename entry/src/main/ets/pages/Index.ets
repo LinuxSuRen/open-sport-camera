@@ -663,7 +663,14 @@ struct Index {
         if (!ok) {
           this.showBanner('水印资产准备失败，本次录制不带水印');
         }
-        StreamRecorderService.begin(this.context);
+        const dir = this.context.cacheDir + '/record';
+        const ts = new Date().getTime();
+        const recPath = dir + '/osc_' + ts + '.mp4';
+        if (!StreamRecorderService.attachRecording(recPath)) {
+          // 管线未运行（推流未开），先启动再挂载
+          StreamRecorderService.beginStream();
+          StreamRecorderService.attachRecording(recPath);
+        }
       } else {
         const profile = this.cameraService.getVideoProfileInfo();
         const rotation = this.frontCamera ? 270 : 90;
@@ -708,7 +715,7 @@ struct Index {
 
       if (this.useStreamPipeline) {
         // 实时管线：视频已带封装完成，直接进入保存（阶段2 起水印在流内）
-        const stats = await StreamRecorderService.stop();
+        const stats = StreamRecorderService.detachRecording();
         const path = StreamRecorderService.getFilePath();
         hilog.info(DOMAIN, TAG, 'stream stop: dur=%{public}lldms frames=%{public}lld',
           stats.durationMs, stats.frames);

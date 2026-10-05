@@ -769,20 +769,8 @@ int RecordStream::Begin(const std::string &outPath)
   if (impl_ == nullptr || impl_->running.load()) {
     return -110;
   }
-  const bool streamOnly = outPath.empty();
-  if (!streamOnly) {
-    impl_->outFd = open(outPath.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0644);
-    if (impl_->outFd < 0) {
-      return -102;
-    }
-    impl_->muxer = OH_AVMuxer_Create(impl_->outFd, AV_OUTPUT_FORMAT_MPEG_4);
-    if (impl_->muxer == nullptr) {
-      close(impl_->outFd);
-      impl_->outFd = -1;
-      return -103;
-    }
-    OH_AVMuxer_SetRotation(impl_->muxer, 0);
-  }
+  // Begin 只启动编码管线（推流供流），muxer 由 StartRecording 挂载
+  // 推流与录制完全解耦
   {
     std::lock_guard<std::mutex> lock(impl_->encOutMtx);
     impl_->muxerStarted = false;
@@ -843,6 +831,67 @@ int RecordStream::Begin(const std::string &outPath)
   impl_->frameCv.notify_all();
   RS_LOG("begin: %{public}s", outPath.c_str());
   return 0;
+}
+
+
+int RecordStream::StartRecording(const std::string &outPath)
+{
+  if (impl_ == nullptr || !impl_->running.load()) {
+    return -130; // 管线未运行
+  }
+  std::lock_guard<std::mutex> lock(impl_->encOutMtx);
+  if (impl_->muxer != nullptr) {
+    return -131; // 已在录制
+  }
+  impl_->outFd = open(outPath.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0644);
+  if (impl_->outFd < 0) {
+    return -132;
+  }
+  impl_->muxer = OH_AVMuxer_Create(impl_->outFd, AV_OUTPUT_FORMAT_MPEG_4);
+  if (impl_->muxer == nullptr) {
+    close(impl_->outFd);
+    impl_->outFd = -1;
+    return -133;
+  }
+  impl_->muxerStarted = false;
+  impl_->videoTrack = -1;
+  impl_->spsNal.clear();
+  impl_->ppsNal.clear();
+  // 音频轨（如可用）
+  impl_->audioTrack = -1;
+  RS_LOG("recording attached: %{public}s", outPath.c_str());
+  return 0;
+}
+
+RecordStats RecordStream::StopRecording()
+{
+  RecordStats stats;
+  if (impl_ == nullptr || impl_->muxer == nullptr) {
+    stats.code = -140;
+    return stats;
+  }
+  // 排空编码输出（EOS 由管线继续运行自然产生，无需额外推送）
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  {
+    std::lock_guard<std::mutex> lock(impl_->encOutMtx);
+    if (impl_->muxerStarted) {
+      OH_AVMuxer_Stop(impl_->muxer);
+    }
+    impl_->muxerStarted = false;
+    OH_AVMuxer_Destroy(impl_->muxer);
+    impl_->muxer = nullptr;
+  }
+  if (impl_->outFd >= 0) {
+    close(impl_->outFd);
+    impl_->outFd = -1;
+  }
+  stats.frames = impl_->frameCount.load();
+  if (impl_->firstTs >= 0 && impl_->lastTs >= impl_->firstTs) {
+    stats.durationMs = (impl_->lastTs - impl_->firstTs) / 1000000;
+  }
+  RS_LOG("recording detached: frames=%{public}llu dur=%{public}lldms (pipeline continues)",
+    static_cast<unsigned long long>(stats.frames), static_cast<long long>(stats.durationMs));
+  return stats;
 }
 
 RecordStats RecordStream::Stop()
