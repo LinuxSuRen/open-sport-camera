@@ -346,6 +346,7 @@ struct Index {
       this.profileText = info.width + 'x' + info.height + '@' + info.frameRate;
       this.cameraReady = true;
     } catch (e) {
+      hilog.error(DOMAIN, TAG, 'openCamera failed: %{public}s', JSON.stringify(e));
       this.showBanner('相机打开失败，请检查相机权限');
     }
   }

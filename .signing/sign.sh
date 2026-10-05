@@ -31,7 +31,7 @@ done
 source "$DIR/passwords.env"
 
 java -jar "$SIGN_TOOL" sign-app \
-  -mode localappsign \
+  -mode localSign \
   -keyAlias oscdebug -keyPwd "$KEY_PWD" \
   -appCertFile "$CER" -profileFile "$P7B" \
   -inFile "$HAP" -keystoreFile "$P12" -keystorePwd "$STORE_PWD" \

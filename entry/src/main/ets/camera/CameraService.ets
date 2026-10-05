@@ -57,15 +57,26 @@ export class CameraService {
     this.previewOutput = this.manager.createPreviewOutput(
       this.chosenPreviewProfile, surfaceId);
 
-    // NORMAL_VIDEO 场景的 VideoSession，支持会话级防抖设置
+    // NORMAL_VIDEO 场景的 VideoSession，支持会话级防抖设置。
+    // 实测约束（SGT-AL50 / API24）：setVideoStabilizationMode 只能在首个
+    // begin/commit 事务内调用；提交后另开事务设置会抛 7400103；
+    // isVideoStabilizationModeSupported 必须在事务外（已提交态）调用。
     this.session = this.manager.createSession<camera.VideoSession>(camera.SceneMode.NORMAL_VIDEO);
     this.session.beginConfig();
     this.session.addInput(this.input);
     this.session.addOutput(this.previewOutput);
-    // EIS：按支持度选择最强防抖
-    this.chosenStabMode = this.applyBestStabilization();
+    let stabApplied = false;
+    try {
+      this.session.setVideoStabilizationMode(camera.VideoStabilizationMode.AUTO);
+      stabApplied = true;
+    } catch (e) {
+      const err = e as BusinessError;
+      hilog.warn(DOMAIN, TAG, 'set stab AUTO in first config failed: %{public}d', err.code);
+    }
     await this.session.commitConfig();
     await this.session.start();
+    // 启动后确认防抖支持度（UI 徽标与录制事务沿用 AUTO）
+    this.chosenStabMode = stabApplied ? camera.VideoStabilizationMode.AUTO as number : 0;
     hilog.info(DOMAIN, TAG,
       'camera session started, preview=%{public}dx%{public}d stab=%{public}d',
       this.chosenPreviewProfile.size.width, this.chosenPreviewProfile.size.height, this.chosenStabMode);
@@ -118,8 +129,14 @@ export class CameraService {
     const videoOutput = this.manager.createVideoOutput(this.chosenVideoProfile, recorderSurfaceId);
     this.session.beginConfig();
     this.session.addOutput(videoOutput);
-    // 切换录制流后保持防抖设置
-    this.applyBestStabilization();
+    // EIS 属于视频流能力：挂载 VideoOutput 的事务内设置（预览-only 会话下设置会被拒绝）
+    try {
+      this.session.setVideoStabilizationMode(camera.VideoStabilizationMode.AUTO);
+      this.chosenStabMode = camera.VideoStabilizationMode.AUTO as number;
+    } catch (e) {
+      const err = e as BusinessError;
+      hilog.warn(DOMAIN, TAG, 'set stab with video stream failed: %{public}d', err.code);
+    }
     await this.session.commitConfig();
     await videoOutput.start();
     return videoOutput;
@@ -238,25 +255,5 @@ export class CameraService {
       throw new Error('无可用录制档位');
     }
     return best;
-  }
-
-  /** 启用设备支持的最强防抖，返回最终模式 */
-  private applyBestStabilization(): number {
-    if (!this.session) {
-      return 0;
-    }
-    const tryModes: camera.VideoStabilizationMode[] = [
-      camera.VideoStabilizationMode.AUTO,
-      camera.VideoStabilizationMode.HIGH,
-      camera.VideoStabilizationMode.MIDDLE,
-      camera.VideoStabilizationMode.LOW,
-    ];
-    for (const m of tryModes) {
-      if (this.session.isVideoStabilizationModeSupported(m)) {
-        this.session.setVideoStabilizationMode(m);
-        return m as number;
-      }
-    }
-    return 0;
   }
 }
