@@ -13,3 +13,4 @@
 /.appanalyzer
 **/oh-package-lock.json5
 *.har
+/.signing/

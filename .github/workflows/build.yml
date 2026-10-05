@@ -1,0 +1,46 @@
+name: build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+env:
+  # HarmonyOS Command Line Tools 6.1.1.268（华为官方 CDN，长期有效签名链接）
+  CDT_URL: https://contentcenter-vali-drcn.dbankcdn.cn/pvt_2/DeveloperAlliance_package_901_9/bb/v3/2kEEcCD9Ts2UwlVvAYKfNQ/commandline-tools-linux-x64-6.1.1.268.zip?HW-CC-KV=V1&HW-CC-Date=20260518T055136Z&HW-CC-Expire=315360000&HW-CC-Sign=E81EFE847B3869574A569EC11FD6E665435892764C866BD083E935748DC07EF
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 缓存 Command Line Tools
+        id: cdt-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/command-line-tools
+          key: cdt-6.1.1.268-linux-x64
+
+      - name: 下载 Command Line Tools
+        if: steps.cdt-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -L --retry 3 -o /tmp/cdt.zip "$CDT_URL"
+          unzip -q /tmp/cdt.zip -d /tmp/cdt-out
+          mv /tmp/cdt-out/command-line-tools ~/command-line-tools
+
+      - name: 安装依赖并构建
+        run: |
+          export PATH=~/command-line-tools/bin:$PATH
+          export DEVECO_SDK_HOME=~/command-line-tools/sdk
+          ohpm install
+          hvigorw assembleHap --mode module -p product=default -p buildMode=debug --no-daemon
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-hap
+          path: entry/build/default/outputs/default/*.hap
+          if-no-files-found: error
