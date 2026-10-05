@@ -73,8 +73,10 @@ void main() {
 static const char *VERT_SRC = R"(#version 300 es
 layout(location=0) in vec2 aPos;
 out vec2 vTex;
+uniform mat3 uTransform; // OH_NativeImage 变换矩阵（处理传感器旋转/镜像）
 void main() {
-    vTex = vec2(aPos.x * 0.5 + 0.5, 0.5 - aPos.y * 0.5);
+    vec2 uv = vec2(aPos.x * 0.5 + 0.5, 0.5 - aPos.y * 0.5);
+    vTex = (uTransform * vec3(uv, 1.0)).xy;
     gl_Position = vec4(aPos, 0.0, 1.0);
 })";
 
@@ -103,6 +105,8 @@ struct RecordStream::Impl {
   GLuint vbo = 0;
   GLuint oesTex = 0;
   GLint uTexLoc = -1;
+  GLint uTransformLoc = -1;
+  float camTransform[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
   // 水印（阶段2）
   GLuint wmProgram = 0;
   GLint wmRectLoc = -1;
@@ -402,6 +406,7 @@ bool RecordStream::Impl::SetupGraphics()
     return false;
   }
   uTexLoc = glGetUniformLocation(program, "uTex");
+  uTransformLoc = glGetUniformLocation(program, "uTransform");
 
   // 水印程序
   GLuint wvs = compile(GL_VERTEX_SHADER, WM_VERT_SRC);
@@ -600,6 +605,16 @@ void RecordStream::Impl::RenderLoop()
     if (OH_NativeImage_UpdateSurfaceImage(nativeImage) != 0) {
       continue;
     }
+    // 获取相机传感器变换矩阵（处理旋转/镜像）
+    {
+      float matrix[16] = {0};
+      if (OH_NativeImage_GetTransformMatrix(nativeImage, matrix) == 0) {
+        // 4x4 → 3x3（取 UV 相关部分）
+        camTransform[0] = matrix[0]; camTransform[1] = matrix[4]; camTransform[2] = matrix[12];
+        camTransform[3] = matrix[1]; camTransform[4] = matrix[5]; camTransform[5] = matrix[13];
+        camTransform[6] = matrix[3]; camTransform[7] = matrix[7]; camTransform[8] = matrix[15];
+      }
+    }
     int64_t ts = OH_NativeImage_GetTimestamp(nativeImage);
     idleCount++;
     if (idleCount % 150 == 0) {
@@ -617,6 +632,9 @@ void RecordStream::Impl::RenderLoop()
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_EXTERNAL_OES, oesTex);
     glUniform1i(uTexLoc, 0);
+    if (uTransformLoc >= 0) {
+      glUniformMatrix3fv(uTransformLoc, 1, GL_FALSE, camTransform);
+    }
     glBindVertexArray(vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
