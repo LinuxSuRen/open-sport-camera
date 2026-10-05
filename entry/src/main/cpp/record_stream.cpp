@@ -73,9 +73,14 @@ void main() {
 static const char *VERT_SRC = R"(#version 300 es
 layout(location=0) in vec2 aPos;
 out vec2 vTex;
-uniform float uFlipX; // 前置摄像头水平镜像修正（1.0=翻转 0.0=不翻转）
+uniform float uFlipX;  // 前置摄像头水平镜像修正
+uniform float uRotate; // 0=不旋转 1=旋转90°（横屏传感器→竖屏输出）
 void main() {
     vec2 uv = vec2(aPos.x * 0.5 + 0.5, 0.5 - aPos.y * 0.5);
+    if (uRotate > 0.5) {
+        // 90° 旋转：竖屏输出坐标系下采样横屏纹理
+        uv = vec2(uv.y, 1.0 - uv.x);
+    }
     if (uFlipX > 0.5) {
         uv.x = 1.0 - uv.x;
     }
@@ -109,6 +114,7 @@ struct RecordStream::Impl {
   GLuint oesTex = 0;
   GLint uTexLoc = -1;
   GLint uFlipXLoc = -1;
+  GLint uRotateLoc = -1;
   std::atomic<float> camFlipX{0.0f}; // 前置摄像头=1.0 后置=0.0（运行时可切换）
   // 水印（阶段2）
   GLuint wmProgram = 0;
@@ -410,6 +416,7 @@ bool RecordStream::Impl::SetupGraphics()
   }
   uTexLoc = glGetUniformLocation(program, "uTex");
   uFlipXLoc = glGetUniformLocation(program, "uFlipX");
+  uRotateLoc = glGetUniformLocation(program, "uRotate");
 
   // 水印程序
   GLuint wvs = compile(GL_VERTEX_SHADER, WM_VERT_SRC);
@@ -645,6 +652,9 @@ void RecordStream::Impl::RenderLoop()
     if (uFlipXLoc >= 0) {
       glUniform1f(uFlipXLoc, camFlipX.load());
     }
+    if (uRotateLoc >= 0) {
+      glUniform1f(uRotateLoc, 1.0f); // 始终旋转到竖屏输出
+    }
     glBindVertexArray(vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
@@ -728,10 +738,12 @@ int RecordStream::Prepare(int width, int height, int fps, int bitrate, int rotat
     return -100;
   }
   impl_ = new Impl();
-  impl_->width = width;
-  impl_->height = height;
+  // 竖屏输出：传感器横屏 (1920x1080) → 编码竖屏 (1080x1920)
+  // GL 内旋转 90°，不用元数据旋转（RTSP 不支持）
+  impl_->width = height;  // 1080
+  impl_->height = width;  // 1920
   impl_->fps = fps;
-  impl_->rotation = rotation;
+  impl_->rotation = 0;   // 不需要元数据旋转
   if (!impl_->InitGL(cameraSurfaceId)) {
     TeardownOf(*impl_);
     delete impl_;
@@ -767,7 +779,7 @@ int RecordStream::Begin(const std::string &outPath)
     impl_->outFd = -1;
     return -103;
   }
-  OH_AVMuxer_SetRotation(impl_->muxer, impl_->rotation);
+  OH_AVMuxer_SetRotation(impl_->muxer, 0); // GL 已旋转，无需元数据
   {
     std::lock_guard<std::mutex> lock(impl_->encOutMtx);
     impl_->muxerStarted = false;

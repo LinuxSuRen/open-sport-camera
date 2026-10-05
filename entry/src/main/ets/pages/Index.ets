@@ -510,7 +510,7 @@ struct Index {
         const info0 = this.cameraService.getVideoProfileInfo();
         const rotation = this.frontCamera ? 270 : 90;
         videoSurfaceId = StreamRecorderService.prepare(
-          info0.width, info0.height, info0.frameRate, 20000000, rotation);
+          info0.width, info0.height, info0.frameRate, 20000000, 0);
         hilog.info(DOMAIN, TAG, 'stream pipeline prepared, surface=%{public}s', videoSurfaceId);
       }
       await this.cameraService.open(this.context, surfaceId,
