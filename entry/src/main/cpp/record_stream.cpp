@@ -4,6 +4,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstring>
 #include <mutex>
@@ -27,6 +28,8 @@
 
 #include "blitter.h"
 #include "codec_common.h"
+#include "mini_json.h"
+#include "overlay_layout.h"
 
 namespace osc {
 
@@ -41,7 +44,30 @@ static constexpr const char *RS_LOG_TAG = "RecordStream";
     OH_LOG_Print(LOG_APP, LOG_ERROR, RS_LOG_DOMAIN, RS_LOG_TAG, "%{public}s: " fmt, __func__,    \
         ##__VA_ARGS__)
 
-// ---------------- 着色器：OES 外部纹理全屏直通（阶段2 叠加水纹路） ----------------
+// ---------------- 着色器：RGBA 水印纹理（UV 可旋转） ----------------
+static const char *WM_VERT_SRC = R"(#version 300 es
+layout(location=0) in vec2 aPos;      // 单位四边形 [-1,1]
+uniform vec4 uRect;                   // NDC: x,y,w,h
+uniform mat2 uUvRot;                  // UV 旋转
+out vec2 vTex;
+void main() {
+    gl_Position = vec4(uRect.xy + aPos * uRect.zw * 0.5, 0.0, 1.0);
+    vec2 uv = vec2(aPos.x * 0.5 + 0.5, 0.5 - aPos.y * 0.5);
+    vTex = uUvRot * (uv - vec2(0.5)) + vec2(0.5);
+})";
+
+static const char *WM_FRAG_SRC = R"(#version 300 es
+precision mediump float;
+in vec2 vTex;
+uniform sampler2D uTex;
+out vec4 outColor;
+void main() {
+    vec4 c = texture(uTex, vTex);
+    if (c.a < 0.01) discard;
+    outColor = c;
+})";
+
+// ---------------- 着色器：OES 外部纹理全屏直通 ----------------
 static const char *VERT_SRC = R"(#version 300 es
 layout(location=0) in vec2 aPos;
 out vec2 vTex;
@@ -75,6 +101,25 @@ struct RecordStream::Impl {
   GLuint vbo = 0;
   GLuint oesTex = 0;
   GLint uTexLoc = -1;
+  // 水印（阶段2）
+  GLuint wmProgram = 0;
+  GLint wmRectLoc = -1;
+  GLint wmUvRotLoc = -1;
+  GLint wmTexLoc = -1;
+  GLuint wmQuadVao = 0;
+  GLuint wmQuadVbo = 0;
+  struct WmAsset {
+    uint32_t tex = 0;
+    int w = 0;
+    int h = 0;
+  };
+  std::vector<WmAsset> wmAssets;      // bufferIndex -> 纹理
+  std::vector<uint8_t> wmBuffersData; // 资产原始数据（渲染线程上传后清空）
+  std::vector<std::pair<size_t, size_t>> wmBufferRanges;
+  std::mutex wmMtx;
+  osc::BurnCfg wmCfg;
+  std::atomic<bool> wmEnabled{false};
+  std::atomic<bool> wmUploadPending{false};
 
   // 相机输入
   OH_NativeImage *nativeImage = nullptr;
@@ -115,6 +160,7 @@ struct RecordStream::Impl {
   void RenderLoop();
   void DrainLoop();
   bool SetupGraphics();
+  void DrawWatermark(int64_t ptsUs);
   bool InitGL(uint64_t &surfaceIdOut);
   bool InitEncoder(int bitrate);
   void Teardown();
@@ -337,6 +383,37 @@ bool RecordStream::Impl::SetupGraphics()
     return false;
   }
   uTexLoc = glGetUniformLocation(program, "uTex");
+
+  // 水印程序
+  GLuint wvs = compile(GL_VERTEX_SHADER, WM_VERT_SRC);
+  GLuint wfs = compile(GL_FRAGMENT_SHADER, WM_FRAG_SRC);
+  if (wvs == 0 || wfs == 0) {
+    return false;
+  }
+  wmProgram = glCreateProgram();
+  glAttachShader(wmProgram, wvs);
+  glAttachShader(wmProgram, wfs);
+  glLinkProgram(wmProgram);
+  glDeleteShader(wvs);
+  glDeleteShader(wfs);
+  GLint wmLinked = 0;
+  glGetProgramiv(wmProgram, GL_LINK_STATUS, &wmLinked);
+  if (!wmLinked) {
+    RS_ERR("wm program link failed");
+    return false;
+  }
+  wmRectLoc = glGetUniformLocation(wmProgram, "uRect");
+  wmUvRotLoc = glGetUniformLocation(wmProgram, "uUvRot");
+  wmTexLoc = glGetUniformLocation(wmProgram, "uTex");
+  glGenVertexArrays(1, &wmQuadVao);
+  glGenBuffers(1, &wmQuadVbo);
+  glBindVertexArray(wmQuadVao);
+  glBindBuffer(GL_ARRAY_BUFFER, wmQuadVbo);
+  const float quad[] = {-1, -1, 1, -1, -1, 1, 1, 1};
+  glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+  glEnableVertexAttribArray(0);
+  glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+
   const float verts[] = {
     -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f,
   };
@@ -368,6 +445,108 @@ void RecordStream::Impl::DrainLoop()
     OnEncodedOutput(this, encoder, idx, buf);
   }
   RS_LOG("drain loop exit");
+}
+
+
+void RecordStream::Impl::DrawWatermark(int64_t ptsUs)
+{
+  // 首次：上传资产纹理（渲染线程持 GL 上下文）
+  if (wmUploadPending.load()) {
+    std::lock_guard<std::mutex> lock(wmMtx);
+    if (wmUploadPending.load()) {
+      wmAssets.resize(wmBufferRanges.size());
+      for (size_t i = 0; i < wmBufferRanges.size(); i++) {
+        const uint8_t *data = wmBuffersData.data() + wmBufferRanges[i].first;
+        size_t len = wmBufferRanges[i].second;
+        int w = 0;
+        int h = 0;
+        if (i < wmCfg.glyphs.size()) {
+          w = wmCfg.glyphs[i].width;
+          h = wmCfg.glyphs[i].height;
+        } else if (i - wmCfg.glyphs.size() < wmCfg.statics.size()) {
+          w = wmCfg.statics[i - wmCfg.glyphs.size()].width;
+          h = wmCfg.statics[i - wmCfg.glyphs.size()].height;
+        }
+        if (w <= 0 || h <= 0 || len < static_cast<size_t>(w) * h * 4) {
+          continue;
+        }
+        GLuint tex = 0;
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+        wmAssets[i].tex = tex;
+        wmAssets[i].w = w;
+        wmAssets[i].h = h;
+      }
+      wmUploadPending.store(false);
+      RS_LOG("watermark assets uploaded: %{public}zu", wmBufferRanges.size());
+    }
+  }
+  if (wmAssets.empty()) {
+    return;
+  }
+  std::vector<osc::DrawQuad> quads = osc::BuildFrameOverlays(wmCfg, ptsUs, width, height);
+  if (quads.empty()) {
+    return;
+  }
+  static int logCount = 0;
+  if (logCount < 3) {
+    logCount++;
+    const auto &q0 = quads[0];
+    RS_LOG("quad0: dst=(%{public}d,%{public}d,%{public}d,%{public}d) src=(%{public}dx%{public}d) rot=%{public}d",
+      q0.dstX, q0.dstY, q0.dstW, q0.dstH, q0.srcW, q0.srcH, q0.rotSteps);
+    RS_LOG("cfg: w=%{public}d h=%{public}d rot=%{public}d anchor=%{public}d mx=%{public}.0f my=%{public}.0f gh=%{public}.0f",
+      wmCfg.videoWidth, wmCfg.videoHeight, wmCfg.rotation, wmCfg.timer.anchor,
+      wmCfg.timer.marginXPx, wmCfg.timer.marginYPx, wmCfg.timer.glyphHeightPx);
+  }
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  glUseProgram(wmProgram);
+  glActiveTexture(GL_TEXTURE0);
+  glUniform1i(wmTexLoc, 0);
+  glBindVertexArray(wmQuadVao);
+  for (const auto &q : quads) {
+    // bufferIndex：glyphs 顺序 + statics 顺序（SetWatermarkAssets 装配）
+    size_t idx = SIZE_MAX;
+    for (size_t i = 0; i < wmCfg.glyphs.size(); i++) {
+      if (wmCfg.glyphs[i].rgba == q.src) {
+        idx = i;
+        break;
+      }
+    }
+    if (idx == SIZE_MAX) {
+      for (size_t i = 0; i < wmCfg.statics.size(); i++) {
+        if (wmCfg.statics[i].rgba == q.src) {
+          idx = wmCfg.glyphs.size() + i;
+          break;
+        }
+      }
+    }
+    if (idx == SIZE_MAX || idx >= wmAssets.size() || wmAssets[idx].tex == 0) {
+      continue;
+    }
+    // NDC 矩形：readback 行序 = NDC 自下而上，帧坐标 y 向下 → y 映射同向
+    float nx = q.dstX * 2.0f / width - 1.0f;
+    float ny = q.dstY * 2.0f / height - 1.0f;
+    float nw = q.dstW * 2.0f / width;
+    float nh = q.dstH * 2.0f / height;
+    glUniform4f(wmRectLoc, nx, ny, nw, nh);
+    // UV 旋转（rotSteps 顺时针）
+    float a = q.rotSteps * 1.5707963f;
+    float cosA = cosf(a);
+    float sinA = sinf(a);
+    // mat2 列主序：逆时针旋转采样 = 顺时针旋转显示
+    float rot[4] = {cosA, -sinA, sinA, cosA};
+    glUniformMatrix2fv(wmUvRotLoc, 1, GL_FALSE, rot);
+    glBindTexture(GL_TEXTURE_2D, wmAssets[idx].tex);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+  }
+  glDisable(GL_BLEND);
 }
 
 void RecordStream::Impl::RenderLoop()
@@ -421,16 +600,22 @@ void RecordStream::Impl::RenderLoop()
     glUniform1i(uTexLoc, 0);
     glBindVertexArray(vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    glFinish();
-    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
 
+    // 阶段2：水印合成（资产就绪时逐帧绘制；计时文本按帧相对时间生成）
     if (firstTs < 0) {
       firstTs = ts;
       RS_LOG("first frame ts=%{public}lld", static_cast<long long>(ts));
     }
     lastTs = ts;
+    int64_t relUs = (ts - firstTs) / 1000;
+    if (wmEnabled.load()) {
+      DrawWatermark(relUs);
+    }
 
-    // 推编码器（缓冲+同步）
+    glFinish();
+    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+
+    // 推编码器（缓冲+同步，PTS 用相对时间）
     uint32_t inIdx = 0;
     if (OH_VideoEncoder_QueryInputBuffer(encoder, &inIdx, 3000000) != AV_ERR_OK) {
       RS_ERR("query input buffer timeout");
@@ -465,7 +650,7 @@ void RecordStream::Impl::RenderLoop()
     if (dst != nullptr && cap >= static_cast<int32_t>(need)) {
       memcpy(dst, nv12.data(), need);
       OH_AVCodecBufferAttr attr = {};
-      attr.pts = ts / 1000; // 编码器 PTS 单位 us，相机时间戳 ns
+      attr.pts = relUs; // 相对首帧的微秒时间戳
       attr.size = static_cast<int32_t>(need);
       OH_AVBuffer_SetBufferAttr(inBuf, &attr);
       OH_VideoEncoder_PushInputBuffer(encoder, inIdx);
@@ -646,17 +831,136 @@ bool RecordStream::IsRecording() const
   return impl_ != nullptr && impl_->running.load();
 }
 
-int RecordStream::SetWatermark(const uint8_t *rgba, int texW, int texH, int x, int y, int w, int h)
+
+int RecordStream::SetWatermarkAssets(const std::string &cfgJson,
+    const std::vector<const uint8_t *> &buffers)
 {
-  (void)rgba;
-  (void)texW;
-  (void)texH;
-  (void)x;
-  (void)y;
-  (void)w;
-  (void)h;
-  return 0; // 阶段2实现
+  if (impl_ == nullptr) {
+    return -120;
+  }
+  osc::JsonValue root;
+  if (!osc::MiniJson::Parse(cfgJson, root) || !root.IsObject()) {
+    return -121;
+  }
+  osc::BurnCfg cfg;
+  cfg.videoWidth = root.Int("videoWidth", impl_->width);
+  cfg.videoHeight = root.Int("videoHeight", impl_->height);
+  cfg.rotation = root.Int("rotation", impl_->rotation);
+  const osc::JsonValue *timer = root.Get("timer");
+  if (timer != nullptr && timer->IsObject() && timer->Bool("enabled", false)) {
+    cfg.timer.enabled = true;
+    cfg.timer.anchor = timer->Int("anchor", 0);
+    cfg.timer.marginXPx = static_cast<float>(timer->Num("marginXPx", 0));
+    cfg.timer.marginYPx = static_cast<float>(timer->Num("marginYPx", 0));
+    cfg.timer.glyphHeightPx = static_cast<float>(timer->Num("glyphHeightPx", 0));
+    cfg.timer.chars = timer->Str("chars", "");
+    cfg.timer.lapLabelIndex = timer->Int("lapLabelIndex", -1);
+    cfg.timer.showLap = timer->Bool("showLap", false);
+    cfg.timer.startOffsetMs = timer->Num("startOffsetMs", 0);
+    const osc::JsonValue *laps = timer->Get("laps");
+    if (laps != nullptr && laps->IsArray()) {
+      for (const auto &l : laps->arr) {
+        osc::LapInfo info;
+        info.index = l.Int("index", 0);
+        info.totalMs = l.Num("totalMs", 0);
+        info.lapMs = l.Num("lapMs", 0);
+        cfg.timer.laps.push_back(info);
+      }
+    }
+  }
+  const osc::JsonValue *glyphs = root.Get("glyphs");
+  if (glyphs != nullptr && glyphs->IsArray()) {
+    for (const auto &g : glyphs->arr) {
+      osc::GlyphMeta meta;
+      meta.ch = g.Str("char", "");
+      meta.width = g.Int("width", 0);
+      meta.height = g.Int("height", 0);
+      int bi = g.Int("bufferIndex", -1);
+      if (bi >= 0 && bi < static_cast<int>(buffers.size())) {
+        meta.rgba = buffers[bi];
+      }
+      if (meta.rgba != nullptr && meta.width > 0 && meta.height > 0) {
+        cfg.glyphs.push_back(meta);
+      }
+    }
+  }
+  const osc::JsonValue *statics = root.Get("statics");
+  if (statics != nullptr && statics->IsArray()) {
+    for (const auto &st : statics->arr) {
+      osc::StaticMeta meta;
+      meta.anchor = st.Int("anchor", 0);
+      meta.marginXPx = static_cast<float>(st.Num("marginXPx", 0));
+      meta.marginYPx = static_cast<float>(st.Num("marginYPx", 0));
+      meta.width = st.Int("width", 0);
+      meta.height = st.Int("height", 0);
+      meta.displayHeightPx = static_cast<float>(st.Num("displayHeightPx", 0));
+      meta.opacity = static_cast<float>(st.Num("opacity", 1.0));
+      int bi = st.Int("bufferIndex", -1);
+      if (bi >= 0 && bi < static_cast<int>(buffers.size())) {
+        meta.rgba = buffers[bi];
+      }
+      if (meta.rgba != nullptr && meta.width > 0 && meta.height > 0) {
+        cfg.statics.push_back(meta);
+      }
+    }
+  }
+  // 拷贝资产数据（调用线程安全，渲染线程稍后上传纹理）
+  {
+    std::lock_guard<std::mutex> lock(impl_->wmMtx);
+    impl_->wmBuffersData.clear();
+    impl_->wmBufferRanges.clear();
+    auto takeBuffer = [&](const uint8_t *p, int w, int h) {
+      size_t off = impl_->wmBuffersData.size();
+      impl_->wmBuffersData.insert(impl_->wmBuffersData.end(), p, p + static_cast<size_t>(w) * h * 4);
+      impl_->wmBufferRanges.emplace_back(off, static_cast<size_t>(w) * h * 4);
+    };
+    // 装配顺序：glyphs 先、statics 后（DrawWatermark 按 rgba 指针匹配）
+    for (auto &g : cfg.glyphs) {
+      takeBuffer(g.rgba, g.width, g.height);
+    }
+    for (auto &st : cfg.statics) {
+      takeBuffer(st.rgba, st.width, st.height);
+    }
+    // rgba 指针改指向拷贝区起始（匹配用 key 改为 bufferIndex 语义）
+    size_t rangeIdx = 0;
+    for (auto &g : cfg.glyphs) {
+      g.rgba = impl_->wmBuffersData.data() + impl_->wmBufferRanges[rangeIdx].first;
+      rangeIdx++;
+    }
+    for (auto &st : cfg.statics) {
+      st.rgba = impl_->wmBuffersData.data() + impl_->wmBufferRanges[rangeIdx].first;
+      rangeIdx++;
+    }
+    impl_->wmCfg = cfg;
+    impl_->wmUploadPending.store(true);
+    impl_->wmEnabled.store(cfg.timer.enabled || !cfg.statics.empty());
+  }
+  RS_LOG("watermark assets set: glyphs=%{public}zu statics=%{public}zu timer=%{public}d",
+    cfg.glyphs.size(), cfg.statics.size(), cfg.timer.enabled ? 1 : 0);
+  return 0;
 }
+
+int RecordStream::UpdateLaps(const std::string &lapsJson)
+{
+  if (impl_ == nullptr) {
+    return -122;
+  }
+  osc::JsonValue root;
+  if (!osc::MiniJson::Parse(lapsJson, root) || !root.IsArray()) {
+    return -123;
+  }
+  std::lock_guard<std::mutex> lock(impl_->wmMtx);
+  impl_->wmCfg.timer.laps.clear();
+  for (const auto &l : root.arr) {
+    osc::LapInfo info;
+    info.index = l.Int("index", 0);
+    info.totalMs = l.Num("totalMs", 0);
+    info.lapMs = l.Num("lapMs", 0);
+    impl_->wmCfg.timer.laps.push_back(info);
+  }
+  return 0;
+}
+
 
 RecordStream::~RecordStream()
 {

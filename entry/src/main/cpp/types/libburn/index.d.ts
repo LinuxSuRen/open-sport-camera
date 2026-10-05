@@ -31,3 +31,9 @@ export interface RecordStats {
   durationMs: number;
   frames: number;
 }
+
+/** 阶段2：录制前设置水印资产（字形图集+静态贴图+计时配置，与烧录配置同构） */
+export const setWatermarkAssets: (cfgJson: string, buffers: ArrayBuffer[]) => number;
+
+/** 录制中更新计圈数据 */
+export const updateWatermarkLaps: (lapsJson: string) => number;

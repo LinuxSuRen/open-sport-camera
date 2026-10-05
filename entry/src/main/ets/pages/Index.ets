@@ -20,7 +20,47 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 const TAG: string = 'Index';
 const DOMAIN: number = 0x0001;
 
-type BurnPhase = 'idle' | 'raster' | 'burning' | 'saving' | 'done' | 'error';
+interface GlyphMetaObj {
+  char: string;
+  width: number;
+  height: number;
+  bufferIndex: number;
+}
+
+interface StaticMetaObj {
+  anchor: number;
+  marginXPx: number;
+  marginYPx: number;
+  width: number;
+  height: number;
+  displayHeightPx: number;
+  opacity: number;
+  bufferIndex: number;
+}
+
+interface WmTimerObj {
+  enabled: boolean;
+  anchor: number;
+  marginXPx: number;
+  marginYPx: number;
+  glyphHeightPx: number;
+  chars: string;
+  lapLabelIndex: number;
+  showLap: boolean;
+  startOffsetMs: number;
+  laps: object[];
+}
+
+interface WmCfgObj {
+  videoWidth: number;
+  videoHeight: number;
+  rotation: number;
+  timer: WmTimerObj;
+  glyphs: GlyphMetaObj[];
+  statics: StaticMetaObj[];
+}
+
+type BurnPhase = 'idle' | 'raster' | 'wmRaster' | 'burning' | 'saving' | 'done' | 'error';
 
 @Entry
 @Component
@@ -81,7 +121,7 @@ struct Index {
     Stack({ alignContent: Alignment.TopStart }) {
       // 字形农场置于底层：自然布局保证 componentSnapshot 可用，
       // 烧录期间被全屏遮罩完全遮挡
-      if (this.burnPhase === 'raster') {
+      if (this.burnPhase === 'raster' || this.burnPhase === 'wmRaster') {
         GlyphFarm({
           chars: ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ':', '.', ' '],
           fontPx: this.timerGlyphPx(),
@@ -148,6 +188,9 @@ struct Index {
       }
 
       if (this.burnPhase === 'burning') {
+        this.BurnBadge()
+      }
+      if (this.burnPhase === 'wmRaster') {
         this.BurnBadge()
       }
       if (this.burnPhase === 'saving') {
@@ -236,7 +279,6 @@ struct Index {
     .width('100%')
     .justifyContent(FlexAlign.Center)
     .padding({ bottom: 8 })
-    .hitTestBehavior(HitTestMode.None)
   }
 
   @Builder
@@ -471,15 +513,103 @@ struct Index {
     }
   }
 
+
+  /** 阶段2：栅格化水印资产并下发实时管线（复用 GlyphFarm 与烧录同款配置） */
+  private async prepareWatermarkAssets(): Promise<boolean> {
+    try {
+      await this.sleep(400); // 等待 GlyphFarm 布局
+      const farm = this.glyphFarm;
+      if (farm === null) {
+        return false;
+      }
+      const timerCfg = this.timerItem();
+      const textItems = this.enabledTextItems();
+      const glyphs: BurnGlyph[] = [];
+      const staticsRaw: BurnGlyph[] = [];
+      if (timerCfg.enabled) {
+        const captured = await farm.captureGlyphs();
+        for (const g of captured) {
+          glyphs.push(g);
+        }
+      }
+      const sc = await farm.captureStatics();
+      for (const g of sc) {
+        staticsRaw.push(g);
+      }
+
+      const buffers: ArrayBuffer[] = [];
+      const glyphMeta: GlyphMetaObj[] = [];
+      for (const g of glyphs) {
+        buffers.push(g.rgba);
+        const meta: GlyphMetaObj = {
+          char: g.char, width: g.width, height: g.height, bufferIndex: buffers.length - 1,
+        };
+        glyphMeta.push(meta);
+      }
+      const staticsMeta: StaticMetaObj[] = [];
+      for (let i = 0; i < staticsRaw.length && i < textItems.length; i++) {
+        buffers.push(staticsRaw[i].rgba);
+        const item = textItems[i];
+        const meta: StaticMetaObj = {
+          anchor: item.anchor,
+          marginXPx: this.marginXPx(item.margin),
+          marginYPx: this.marginYPx(item.margin),
+          width: staticsRaw[i].width,
+          height: staticsRaw[i].height,
+          displayHeightPx: this.staticFontPxList()[i],
+          opacity: item.opacity,
+          bufferIndex: buffers.length - 1,
+        };
+        staticsMeta.push(meta);
+      }
+
+      const info = this.cameraService.getVideoProfileInfo();
+      const rotation = this.frontCamera ? 270 : 90;
+      const timerObj: WmTimerObj = {
+        enabled: timerCfg.enabled,
+        anchor: timerCfg.anchor,
+        marginXPx: this.marginXPx(timerCfg.margin),
+        marginYPx: this.marginYPx(timerCfg.margin),
+        glyphHeightPx: this.timerGlyphPx(),
+        chars: '0123456789:. ',
+        lapLabelIndex: timerCfg.showLap && glyphs.length > 0 ? glyphs.length - 1 : -1,
+        showLap: timerCfg.showLap,
+        startOffsetMs: 0,
+        laps: this.snapshotLaps() as object[],
+      };
+      const cfg: WmCfgObj = {
+        videoWidth: info.width,
+        videoHeight: info.height,
+        rotation: rotation,
+        timer: timerObj,
+        glyphs: glyphMeta,
+        statics: staticsMeta,
+      };
+      StreamRecorderService.setWatermark(JSON.stringify(cfg), buffers);
+      hilog.info(DOMAIN, TAG, 'watermark assets ready: %{public}d glyphs', glyphs.length);
+      return true;
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'prepareWatermarkAssets failed: %{public}s', JSON.stringify(e));
+      return false;
+    }
+  }
+
   private async startRecording(): Promise<void> {
-    if (!this.cameraReady || this.recording || this.burnPhase === 'burning' || this.burnPhase === 'raster') {
-      if (this.burnPhase === 'burning' || this.burnPhase === 'raster') {
-        this.showBanner('水印还在写入，稍等一下');
+    if (!this.cameraReady || this.recording || this.burnPhase === 'burning' || this.burnPhase === 'raster' || this.burnPhase === 'wmRaster') {
+      if (this.burnPhase === 'burning' || this.burnPhase === 'raster' || this.burnPhase === 'wmRaster') {
+        this.showBanner('水印还在准备，稍等一下');
       }
       return;
     }
     try {
       if (this.useStreamPipeline) {
+        // 阶段2：录制前栅格化水印资产（~400ms），随后入流合成
+        this.burnPhase = 'wmRaster';
+        const ok = await this.prepareWatermarkAssets();
+        this.burnPhase = 'idle';
+        if (!ok) {
+          this.showBanner('水印资产准备失败，本次录制不带水印');
+        }
         StreamRecorderService.begin(this.context);
       } else {
         const profile = this.cameraService.getVideoProfileInfo();
@@ -491,7 +621,7 @@ struct Index {
 
       // 计时与录制完全同步：每次录制都从 0 起跑
       this.swimTimer.reset();
-      this.swimTimer.start();
+      this.swimTimer.start();  // 实时管线水印 startOffsetMs=0（计时与首帧同源）
       // 首帧到达时刻记录计时基准，烧录时按 基准+PTS 逐帧还原读数（仅旧管线）
       this.recStartTimerOffset = this.swimTimer.elapsedMs();
       if (this.videoOutput !== undefined) {
@@ -513,6 +643,7 @@ struct Index {
   }
 
   private async stopRecording(): Promise<void> {
+    hilog.info(DOMAIN, TAG, 'stopRecording entry');
     if (!this.recording) {
       return;
     }
@@ -570,6 +701,7 @@ struct Index {
   }
 
   private doLap(): void {
+    hilog.info(DOMAIN, TAG, 'doLap entry');
     if (!this.recording) {
       this.showBanner('录制中才能计圈');
       return;
@@ -577,6 +709,9 @@ struct Index {
     const lap = this.swimTimer.lap();
     if (lap !== null) {
       this.refreshTimerTexts();
+      if (this.useStreamPipeline) {
+        StreamRecorderService.updateLaps(JSON.stringify(this.snapshotLaps()));
+      }
     }
   }
 

@@ -268,24 +268,48 @@ static napi_value NapiBeginRecord(napi_env env, napi_callback_info info)
     return result;
 }
 
+// 停止录制：async work —— Execute 工作线程跑 Stop，Complete 回 JS 线程解决 Promise
+struct StopRecordCtx {
+    napi_deferred deferred = nullptr;
+    napi_async_work work = nullptr;
+    osc::RecordStats stats;
+};
+
+static void StopRecordExecute(napi_env env, void *data)
+{
+    (void)env;
+    auto *ctx = static_cast<StopRecordCtx *>(data);
+    ctx->stats = g_recordStream.Stop();
+}
+
+static void StopRecordComplete(napi_env env, napi_status status, void *data)
+{
+    (void)status;
+    auto *ctx = static_cast<StopRecordCtx *>(data);
+    napi_value result = nullptr;
+    napi_create_object(env, &result);
+    napi_value dur = nullptr;
+    napi_create_int64(env, ctx->stats.durationMs, &dur);
+    napi_set_named_property(env, result, "durationMs", dur);
+    napi_value frames = nullptr;
+    napi_create_int64(env, static_cast<int64_t>(ctx->stats.frames), &frames);
+    napi_set_named_property(env, result, "frames", frames);
+    napi_resolve_deferred(env, ctx->deferred, result);
+    napi_delete_async_work(env, ctx->work);
+    delete ctx;
+}
+
 static napi_value NapiStopRecord(napi_env env, napi_callback_info info)
 {
     (void)info;
+    auto *ctx = new StopRecordCtx();
     napi_value promise = nullptr;
-    napi_deferred deferred = nullptr;
-    napi_create_promise(env, &deferred, &promise);
-    std::thread([env, deferred]() {
-        osc::RecordStats stats = g_recordStream.Stop();
-        napi_value result = nullptr;
-        napi_create_object(env, &result);
-        napi_value dur = nullptr;
-        napi_create_int64(env, stats.durationMs, &dur);
-        napi_set_named_property(env, result, "durationMs", dur);
-        napi_value frames = nullptr;
-        napi_create_int64(env, static_cast<int64_t>(stats.frames), &frames);
-        napi_set_named_property(env, result, "frames", frames);
-        napi_resolve_deferred(env, deferred, result);
-    }).detach();
+    napi_create_promise(env, &ctx->deferred, &promise);
+    napi_value resourceName = nullptr;
+    napi_create_string_utf8(env, "oscStopRecord", NAPI_AUTO_LENGTH, &resourceName);
+    napi_create_async_work(env, nullptr, resourceName, StopRecordExecute, StopRecordComplete,
+        ctx, &ctx->work);
+    napi_queue_async_work(env, ctx->work);
     return promise;
 }
 
@@ -295,6 +319,63 @@ static napi_value NapiReleaseRecord(napi_env env, napi_callback_info info)
     (void)info;
     g_recordStream.Release();
     return nullptr;
+}
+
+
+static napi_value NapiSetWatermarkAssets(napi_env env, napi_callback_info info)
+{
+    size_t argc = 2;
+    napi_value args[2] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc < 2) {
+        napi_throw_error(env, nullptr, "setWatermarkAssets 需要 2 个参数");
+        return nullptr;
+    }
+    char buf[8192] = {0};
+    size_t len = 0;
+    napi_get_value_string_utf8(env, args[0], buf, sizeof(buf), &len);
+    std::vector<const uint8_t *> buffers;
+    bool isArray = false;
+    napi_is_array(env, args[1], &isArray);
+    if (isArray) {
+        uint32_t count = 0;
+        napi_get_array_length(env, args[1], &count);
+        for (uint32_t i = 0; i < count; i++) {
+            napi_value elem = nullptr;
+            napi_get_element(env, args[1], i, &elem);
+            void *data = nullptr;
+            size_t byteLen = 0;
+            bool ok = false;
+            napi_is_arraybuffer(env, elem, &ok);
+            if (ok && napi_get_arraybuffer_info(env, elem, &data, &byteLen) == napi_ok && data != nullptr) {
+                buffers.push_back(static_cast<const uint8_t *>(data));
+            } else {
+                buffers.push_back(nullptr);
+            }
+        }
+    }
+    int code = g_recordStream.SetWatermarkAssets(std::string(buf), buffers);
+    napi_value result = nullptr;
+    napi_create_int32(env, code, &result);
+    return result;
+}
+
+static napi_value NapiUpdateWatermarkLaps(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc < 1) {
+        napi_throw_error(env, nullptr, "updateWatermarkLaps 需要 1 个参数");
+        return nullptr;
+    }
+    char buf[8192] = {0};
+    size_t len = 0;
+    napi_get_value_string_utf8(env, args[0], buf, sizeof(buf), &len);
+    int code = g_recordStream.UpdateLaps(std::string(buf));
+    napi_value result = nullptr;
+    napi_create_int32(env, code, &result);
+    return result;
 }
 
 } // namespace} // namespace
@@ -308,6 +389,8 @@ static napi_value Init(napi_env env, napi_value exports)
         {"beginRecord", nullptr, NapiBeginRecord, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"stopRecord", nullptr, NapiStopRecord, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"releaseRecord", nullptr, NapiReleaseRecord, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setWatermarkAssets", nullptr, NapiSetWatermarkAssets, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"updateWatermarkLaps", nullptr, NapiUpdateWatermarkLaps, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;

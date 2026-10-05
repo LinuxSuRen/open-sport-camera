@@ -17,6 +17,7 @@
 #include <atomic>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace osc {
 
@@ -48,8 +49,15 @@ public:
   bool IsPrepared() const;
   bool IsRecording() const;
 
-  /** 阶段2：设置水印纹理（RGBA 缓冲 + 显示空间布局参数） */
-  int SetWatermark(const uint8_t *rgba, int texW, int texH, int x, int y, int w, int h);
+  /**
+   * 阶段2：设置水印资产（录制前调用）。
+   * cfgJson 与烧录管线同构（glyphs/statics/timer），buffers 为 RGBA 缓冲，
+   * 调用时拷贝（JS 侧无需保活）。
+   */
+  int SetWatermarkAssets(const std::string &cfgJson, const std::vector<const uint8_t *> &buffers);
+
+  /** 录制中更新计圈（计圈点击时调用） */
+  int UpdateLaps(const std::string &lapsJson);
 
   ~RecordStream();
 

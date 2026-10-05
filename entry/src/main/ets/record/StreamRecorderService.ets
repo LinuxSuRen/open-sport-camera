@@ -66,6 +66,16 @@ export class StreamRecorderService {
     return stats as StreamRecordStats;
   }
 
+  /** 阶段2：录制前设置水印资产（rgba 在 native 侧拷贝） */
+  static setWatermark(cfgJson: string, buffers: ArrayBuffer[]): void {
+    burn.setWatermarkAssets(cfgJson, buffers);
+  }
+
+  /** 录制中更新计圈 */
+  static updateLaps(lapsJson: string): void {
+    burn.updateWatermarkLaps(lapsJson);
+  }
+
   static release(): void {
     if (StreamRecorderService.prepared) {
       burn.releaseRecord();
