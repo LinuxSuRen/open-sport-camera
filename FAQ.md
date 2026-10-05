@@ -88,6 +88,18 @@ hvigorw assembleHap --mode module -p product=default -p buildMode=debug --no-dae
 
 部分机型的 native AVCodecService 只注册了视频编解码器（如 SGT-AL50 只有 OMX.hisi.video.encoder.avc），没有 native AAC 音频编码器。应用会自动降级为无声录制，不影响视频质量。待设备/SDK 更新后可恢复。
 
+## 视频画面有重影/鬼影？
+
+部分机型（如 SGT-AL50）的相机 HAL 层启用了 TNR（时间降噪），会将多帧画面合成输出。
+快速移动的物体（如游泳者）会产生鬼影效果。
+
+**这是设备级处理，应用层无法关闭**（HarmonyOS Camera Kit 未暴露降噪控制 API）。
+
+**缓解方式**：
+- 光线充足的环境下 TNR 强度会降低
+- 尝试切换到超广角或长焦镜头（不同传感器可能使用不同 TNR 参数）
+- 固件更新可能改善标定参数
+
 ## 调试工具
 
 ```bash
