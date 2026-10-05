@@ -13,6 +13,7 @@
 #include "napi/native_api.h"
 
 #include "burn_engine.h"
+#include "record_stream.h"
 #include "mini_json.h"
 #include "overlay_layout.h"
 
@@ -219,13 +220,94 @@ napi_value StartBurn(napi_env env, napi_callback_info info)
     return promise;
 }
 
-} // namespace
+
+// ---------------- 实时录制管线（阶段1） ----------------
+static osc::RecordStream g_recordStream;
+
+static napi_value NapiPrepareRecord(napi_env env, napi_callback_info info)
+{
+    size_t argc = 5;
+    napi_value args[5] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc < 5) {
+        napi_throw_error(env, nullptr, "prepareRecord 需要 5 个参数");
+        return nullptr;
+    }
+    int32_t w = 0, h = 0, fps = 30, bitrate = 20000000, rotation = 90;
+    napi_get_value_int32(env, args[0], &w);
+    napi_get_value_int32(env, args[1], &h);
+    napi_get_value_int32(env, args[2], &fps);
+    napi_get_value_int32(env, args[3], &bitrate);
+    napi_get_value_int32(env, args[4], &rotation);
+    uint64_t surfaceId = 0;
+    int code = g_recordStream.Prepare(w, h, fps, bitrate, rotation, surfaceId);
+    if (code != 0) {
+        napi_throw_error(env, nullptr, "prepareRecord 失败");
+        return nullptr;
+    }
+    napi_value result = nullptr;
+    napi_create_string_utf8(env, std::to_string(surfaceId).c_str(), NAPI_AUTO_LENGTH, &result);
+    return result;
+}
+
+static napi_value NapiBeginRecord(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc < 1) {
+        napi_throw_error(env, nullptr, "beginRecord 需要 1 个参数");
+        return nullptr;
+    }
+    char buf[4096] = {0};
+    size_t len = 0;
+    napi_get_value_string_utf8(env, args[0], buf, sizeof(buf), &len);
+    int code = g_recordStream.Begin(std::string(buf));
+    napi_value result = nullptr;
+    napi_create_int32(env, code, &result);
+    return result;
+}
+
+static napi_value NapiStopRecord(napi_env env, napi_callback_info info)
+{
+    (void)info;
+    napi_value promise = nullptr;
+    napi_deferred deferred = nullptr;
+    napi_create_promise(env, &deferred, &promise);
+    std::thread([env, deferred]() {
+        osc::RecordStats stats = g_recordStream.Stop();
+        napi_value result = nullptr;
+        napi_create_object(env, &result);
+        napi_value dur = nullptr;
+        napi_create_int64(env, stats.durationMs, &dur);
+        napi_set_named_property(env, result, "durationMs", dur);
+        napi_value frames = nullptr;
+        napi_create_int64(env, static_cast<int64_t>(stats.frames), &frames);
+        napi_set_named_property(env, result, "frames", frames);
+        napi_resolve_deferred(env, deferred, result);
+    }).detach();
+    return promise;
+}
+
+static napi_value NapiReleaseRecord(napi_env env, napi_callback_info info)
+{
+    (void)env;
+    (void)info;
+    g_recordStream.Release();
+    return nullptr;
+}
+
+} // namespace} // namespace
 
 EXTERN_C_START
 static napi_value Init(napi_env env, napi_value exports)
 {
     napi_property_descriptor desc[] = {
         {"startBurn", nullptr, StartBurn, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"prepareRecord", nullptr, NapiPrepareRecord, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"beginRecord", nullptr, NapiBeginRecord, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"stopRecord", nullptr, NapiStopRecord, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"releaseRecord", nullptr, NapiReleaseRecord, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;

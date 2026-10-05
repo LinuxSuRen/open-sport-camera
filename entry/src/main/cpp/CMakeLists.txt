@@ -14,7 +14,9 @@ add_library(burn SHARED
     mini_json.cpp
     overlay_layout.cpp
     blitter.cpp
+    codec_common.cpp
     burn_engine.cpp
+    record_stream.cpp
 )
 
 find_library(
@@ -37,6 +39,11 @@ target_link_libraries(burn PUBLIC
     libnative_media_avsource.so
     libnative_media_avdemuxer.so
     libnative_media_avmuxer.so
+    libEGL.so
+    libGLESv3.so
+    libnative_image.so
+    libnative_window.so
+    libace_ndk.z.so
 )
 
 target_include_directories(burn PUBLIC ${NATIVERENDER_ROOT_PATH})

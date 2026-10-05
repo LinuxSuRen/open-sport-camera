@@ -38,6 +38,10 @@ hvigorw assembleHap --mode module -p product=default --no-daemon
 
 CI 每次推送自动构建未签名 HAP（见 [build.yml](.github/workflows/build.yml)）。真机安装需要调试签名，流程见[贡献指南](CONTRIBUTING.md)。
 
+## 常见问题
+
+开发与真机调试的常见问题见 [FAQ.md](FAQ.md)。
+
 ## 参与贡献
 
 欢迎 Issue / PR：水印类型扩展、防抖增强、录制参数、UI 打磨都是好方向。
