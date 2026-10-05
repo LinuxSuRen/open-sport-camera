@@ -8,6 +8,8 @@
 #include <cstring>
 #include <vector>
 
+#include "hilog/log.h"
+
 #include "blitter.h"
 #include "multimedia/player_framework/native_avbuffer.h"
 #include "multimedia/player_framework/native_avcodec_base.h"
@@ -23,11 +25,21 @@ namespace osc {
 // 轮询超时：足够长以容忍编解码器内部排队，又不至于卡死
 static constexpr int64_t POLL_TIMEOUT_US = 3000000; // 3s
 
-// 失败即跳出主 do-while，进入统一清理段
+// 引擎日志域（真机排查烧录链路主要手段）
+static constexpr unsigned int OSC_LOG_DOMAIN = 0x0012;
+static constexpr const char *OSC_LOG_TAG = "BurnEngine";
+
+#define MEDIA_LOG_INFO(fmt, ...)                                                               \
+    OH_LOG_Print(LOG_APP, LOG_INFO, OSC_LOG_DOMAIN, OSC_LOG_TAG, "%{public}s: " fmt, __func__, ##__VA_ARGS__)
+#define MEDIA_LOG_ERROR(fmt, ...)                                                              \
+    OH_LOG_Print(LOG_APP, LOG_ERROR, OSC_LOG_DOMAIN, OSC_LOG_TAG, "%{public}s: " fmt, __func__, ##__VA_ARGS__)
+
+// 失败即记日志并跳出主 do-while，进入统一清理段
 #define OSC_CHECK(expr)                                                        \
     if (true) {                                                                \
         OH_AVErrCode _c = (expr);                                              \
         if (_c != AV_ERR_OK) {                                                 \
+            MEDIA_LOG_ERROR("call " #expr " failed, code=%{public}d", _c);     \
             ret = -20;                                                         \
             break;                                                             \
         }                                                                      \
@@ -71,6 +83,7 @@ int BurnEngine::Run(const std::string &srcPath, const std::string &dstPath,
         }
         source = OH_AVSource_CreateWithFD(srcFd, 0, st.st_size);
         if (source == nullptr) {
+            MEDIA_LOG_ERROR("create source failed");
             ret = -3;
             break;
         }
@@ -120,9 +133,12 @@ int BurnEngine::Run(const std::string &srcPath, const std::string &dstPath,
             OH_AVFormat_Destroy(srcFmt);
         }
         if (videoTrackIdx < 0) {
+            MEDIA_LOG_ERROR("no video track found");
             ret = -5;
             break;
         }
+        MEDIA_LOG_INFO("tracks: video=%{public}d audio=%{public}d %{public}dx%{public}d mime=%{public}s",
+            videoTrackIdx, audioTrackIdx, videoW, videoH, videoMime.c_str());
         if (videoW <= 0 || videoH <= 0) {
             ret = -6;
             break;
@@ -165,6 +181,7 @@ int BurnEngine::Run(const std::string &srcPath, const std::string &dstPath,
             OH_AVFormat_Destroy(decFmt);
         }
         OSC_CHECK(OH_VideoDecoder_Start(decoder));
+        MEDIA_LOG_INFO("decoder started");
 
         // ---------- 编码器 ----------
         encoder = OH_VideoEncoder_CreateByMime("video/avc");
@@ -182,6 +199,7 @@ int BurnEngine::Run(const std::string &srcPath, const std::string &dstPath,
             OH_AVFormat_Destroy(encFmt);
         }
         OSC_CHECK(OH_VideoEncoder_Start(encoder));
+        MEDIA_LOG_INFO("encoder started");
 
         // ---------- 输出 ----------
         dstFd = open(dstPath.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0644);
@@ -395,9 +413,11 @@ int BurnEngine::Run(const std::string &srcPath, const std::string &dstPath,
             }
         }
 
+        MEDIA_LOG_INFO("video pass done, muxer stopping");
         ReportProgress(onProgress, 96);
         OH_AVMuxer_Stop(muxer);
         ReportProgress(onProgress, 100);
+        MEDIA_LOG_INFO("burn finished, ret=%{public}d", ret);
     } while (0);
 
     // ---------- 清理 ----------
