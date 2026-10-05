@@ -461,7 +461,7 @@ struct Index {
   private startRecDurationTick(): void {
     this.recStartMs = new Date().getTime();
     this.recTickId = setInterval(() => {
-      const sec = Math.floor((new Date().getTime() - this.recStartMs) / 1000);
+      const sec = Math.floor((Date.now() - this.recStartMs) / 1000);
       const m = Math.floor(sec / 60) % 60;
       const s = sec % 60;
       const mm: string = m < 10 ? '0' + m : '' + m;
@@ -612,9 +612,12 @@ struct Index {
 
   private staticFontPxList(): number[] {
     const out: number[] = [];
-    for (const item of this.enabledTextItems()) {
+    const previewH = this.previewHeightVp;
+    const videoH = this.displayHeightPx();
+    const items = this.enabledTextItems();
+    for (const item of items) {
       const fontVp = 18 * item.fontScale;
-      out.push(Math.round(fontVp / this.previewHeightVp * this.displayHeightPx()));
+      out.push(Math.round(fontVp / previewH * videoH));
     }
     return out;
   }
