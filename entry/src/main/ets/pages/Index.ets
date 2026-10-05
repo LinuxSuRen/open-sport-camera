@@ -436,9 +436,20 @@ struct Index {
         SaveButton({ text: SaveDescription.SAVE_TO_GALLERY, icon: SaveIconStyle.FULL_FILLED,
           buttonType: ButtonType.Capsule })
           .onClick(async () => {
+            if (this.burnPhase === 'saving') {
+              return; // 防重复点击
+            }
             try {
+              // 文件存在性检查
+              if (!this.fileExists(this.burnedPath)) {
+                this.burnMsg = '录制文件不存在，请重新录制';
+                this.burnPhase = 'done';
+                return;
+              }
               this.burnPhase = 'saving';
               await GalleryService.saveVideo(this.context, this.burnedPath);
+              // 延迟清理：等文件系统 flush
+              await this.sleep(500);
               this.cleanupFile(this.burnedSrcPath);
               this.cleanupFile(this.burnedPath);
               this.gallerySaved = true;
@@ -974,6 +985,15 @@ struct Index {
         this.banner = '';
       }
     }, 2600);
+  }
+
+
+  private fileExists(path: string): boolean {
+    try {
+      return path.length > 0 && fileIo.accessSync(path);
+    } catch (e) {
+      return false;
+    }
   }
 
   private cleanupFile(path: string): void {
